@@ -1,7 +1,7 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
-VisualStudioVersion = 17.14.36705.20 d17.14
+VisualStudioVersion = 17.14.36705.20
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CanvasApp.Common", "CanvasApp.Common\CanvasApp.Common.csproj", "{ED3C11DD-1135-427B-B4EC-FC215E77E9D8}"
 EndProject
@@ -10,6 +10,20 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CanvasApp.Client", "CanvasApp.Client\CanvasApp.Client.csproj", "{3BFEE624-5C40-44CA-A386-12BA0DF52AD5}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CanvasApp.AuthServer", "CanvasApp.AuthServer\CanvasApp.AuthServer.csproj", "{146F8273-8C5A-4FD4-9FA7-B55C3C273152}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Docs", "Docs", "{02EA681E-C7D8-13C7-8484-4AC65E1B71E8}"
+	ProjectSection(SolutionItems) = preProject
+		BUGS.md = BUGS.md
+		DEMO_GUIDE.md = DEMO_GUIDE.md
+		README.md = README.md
+		ARCHITECTURE.md = ARCHITECTURE.md
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tools", "Tools", "{A3D2A324-4C79-4E56-93DF-34ED6C4B410C}"
+	ProjectSection(SolutionItems) = preProject
+		generate_test_data.py = generate_test_data.py
+		stress_test.py = stress_test.py
+	EndProjectSection
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

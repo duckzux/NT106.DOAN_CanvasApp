@@ -1,14 +1,47 @@
+<<<<<<< HEAD
 # Visual Studio
 .vs/
 [Bb]in/
 [Oo]bj/
+=======
+## .gitignore
+ 
+# Build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+ 
+# Visual Studio
+.vs/
+>>>>>>> 5e188881588140f593e21bef72b83a9389a462a1
 *.user
 *.suo
 *.userosscache
 *.sln.docstates
+<<<<<<< HEAD
 
 # NuGet PackagesRestore)
 packages/
 
 Thumbs.db
 desktop.ini
+=======
+ 
+# NuGet
+packages/
+*.nupkg
+ 
+# OS files
+Thumbs.db
+.DS_Store
+ 
+# IDE
+*.resharper
+.idea/
+ 
+# Compiled
+*.exe
+*.dll
+*.pdb
+>>>>>>> 5e188881588140f593e21bef72b83a9389a462a1

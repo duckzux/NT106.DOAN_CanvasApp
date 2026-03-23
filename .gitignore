@@ -1,0 +1,31 @@
+## .gitignore
+ 
+# Build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+ 
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+ 
+# NuGet
+packages/
+*.nupkg
+ 
+# OS files
+Thumbs.db
+.DS_Store
+ 
+# IDE
+*.resharper
+.idea/
+ 
+# Compiled
+*.exe
+*.dll
+*.pdb

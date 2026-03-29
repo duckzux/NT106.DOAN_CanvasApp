@@ -1,0 +1,15 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace CanvasApp.LoadBalancer
+{
+    internal class Program
+    {
+        static void Main(string[] args)
+        {
+        }
+    }
+}

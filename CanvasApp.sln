@@ -13,16 +13,16 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CanvasApp.AuthServer", "Can
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Docs", "Docs", "{02EA681E-C7D8-13C7-8484-4AC65E1B71E8}"
 	ProjectSection(SolutionItems) = preProject
-		BUGS.md = BUGS.md
-		DEMO_GUIDE.md = DEMO_GUIDE.md
-		README.md = README.md
-		ARCHITECTURE.md = ARCHITECTURE.md
+		Docs\ARCHITECTURE.md = Docs\ARCHITECTURE.md
+		Docs\BUGS.md = Docs\BUGS.md
+		Docs\DEMO_GUIDE.md = Docs\DEMO_GUIDE.md
+		Docs\README.md = Docs\README.md
 	EndProjectSection
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tools", "Tools", "{A3D2A324-4C79-4E56-93DF-34ED6C4B410C}"
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{8EC462FD-D22E-90A8-E5CE-7E832BA40C5D}"
 	ProjectSection(SolutionItems) = preProject
-		generate_test_data.py = generate_test_data.py
-		stress_test.py = stress_test.py
+		Tools\generate_test_data.py = Tools\generate_test_data.py
+		Tools\stress_test.py = Tools\stress_test.py
 	EndProjectSection
 EndProject
 Global

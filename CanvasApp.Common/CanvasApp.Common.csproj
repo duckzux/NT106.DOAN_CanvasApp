@@ -96,6 +96,12 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="DataAccess\CanvasSnapshotDAO.cs" />
+    <Compile Include="DataAccess\DatabaseManager.cs" />
+    <Compile Include="DataAccess\DrawActionDAO.cs" />
+    <Compile Include="DataAccess\RoomDAO.cs" />
+    <Compile Include="DataAccess\RoomMemberDAO.cs" />
+    <Compile Include="DataAccess\UserDAO.cs" />
     <Compile Include="Models\CursorInfo.cs" />
     <Compile Include="Models\DrawAction.cs" />
     <Compile Include="Models\Layer.cs" />

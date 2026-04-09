@@ -1,5 +1,4 @@
-﻿using MetroFramework.Forms;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
@@ -9,11 +8,11 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace CanvasApp.Client.Forms
+namespace CanvasApp.Client.Controls
 {
-    public partial class CanvasForm : MetroForm
+    public partial class UserListItem : UserControl
     {
-        public CanvasForm()
+        public UserListItem()
         {
             InitializeComponent();
         }

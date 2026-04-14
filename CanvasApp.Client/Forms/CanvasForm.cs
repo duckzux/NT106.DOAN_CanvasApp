@@ -11,7 +11,7 @@ using System.Windows.Forms;
 
 namespace CanvasApp.Client.Forms
 {
-    public partial class CanvasForm : MetroForm
+    public partial class CanvasForm : Form
     {
         public CanvasForm()
         {

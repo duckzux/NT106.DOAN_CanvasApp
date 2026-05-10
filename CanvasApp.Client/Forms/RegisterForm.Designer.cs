@@ -1,16 +1,9 @@
-﻿namespace CanvasApp
+namespace CanvasApp.Client
 {
     partial class RegisterForm
     {
-        /// <summary>
-        /// Required designer variable.
-        /// </summary>
         private System.ComponentModel.IContainer components = null;
 
-        /// <summary>
-        /// Clean up any resources being used.
-        /// </summary>
-        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
         protected override void Dispose(bool disposing)
         {
             if (disposing && (components != null))
@@ -22,21 +15,17 @@
 
         #region Windows Form Designer generated code
 
-        /// <summary>
-        /// Required method for Designer support - do not modify
-        /// the contents of this method with the code editor.
-        /// </summary>
         private void InitializeComponent()
         {
-            this.txtUsername = new CanvasApp.loginTextbox();
+            this.txtUsername = new loginTextbox();          // FIX: bỏ "CanvasApp."
             this.label3 = new System.Windows.Forms.Label();
-            this.gradientPanel1 = new CanvasApp.GradientPanel();
+            this.gradientPanel1 = new GradientPanel();      // FIX: bỏ "CanvasApp."
             this.label2 = new System.Windows.Forms.Label();
             this.pictureBox1 = new System.Windows.Forms.PictureBox();
             this.label1 = new System.Windows.Forms.Label();
             this.btnReg = new Guna.UI2.WinForms.Guna2Button();
-            this.txtPassword = new CanvasApp.loginTextbox();
-            this.txtEmail = new CanvasApp.loginTextbox();
+            this.txtPassword = new loginTextbox();          // FIX: bỏ "CanvasApp."
+            this.txtEmail = new loginTextbox();             // FIX: bỏ "CanvasApp."
             this.gradientPanel1.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.pictureBox1)).BeginInit();
             this.SuspendLayout();
@@ -92,7 +81,7 @@
             // pictureBox1
             // 
             this.pictureBox1.BackColor = System.Drawing.Color.Transparent;
-            this.pictureBox1.Image = global::CanvasApp.Properties.Resources.whitever;
+            this.pictureBox1.Image = global::CanvasApp.Client.Properties.Resources.whitever; // FIX
             this.pictureBox1.Location = new System.Drawing.Point(126, 192);
             this.pictureBox1.Name = "pictureBox1";
             this.pictureBox1.Size = new System.Drawing.Size(336, 252);
@@ -172,7 +161,6 @@
             ((System.ComponentModel.ISupportInitialize)(this.pictureBox1)).EndInit();
             this.ResumeLayout(false);
             this.PerformLayout();
-
         }
 
         #endregion

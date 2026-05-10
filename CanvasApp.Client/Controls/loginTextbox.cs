@@ -8,7 +8,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace CanvasApp
+namespace CanvasApp.Client
 {
     public partial class loginTextbox : UserControl
     {

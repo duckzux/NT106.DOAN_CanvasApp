@@ -1,16 +1,9 @@
-﻿namespace CanvasApp
+namespace CanvasApp.Client
 {
     partial class RoomCard
     {
-        /// <summary> 
-        /// Required designer variable.
-        /// </summary>
         private System.ComponentModel.IContainer components = null;
 
-        /// <summary> 
-        /// Clean up any resources being used.
-        /// </summary>
-        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
         protected override void Dispose(bool disposing)
         {
             if (disposing && (components != null))
@@ -22,10 +15,6 @@
 
         #region Component Designer generated code
 
-        /// <summary> 
-        /// Required method for Designer support - do not modify 
-        /// the contents of this method with the code editor.
-        /// </summary>
         private void InitializeComponent()
         {
             this.guna2Panel1 = new Guna.UI2.WinForms.Guna2Panel();
@@ -58,7 +47,7 @@
             // guna2CirclePictureBox1
             // 
             this.guna2CirclePictureBox1.Anchor = System.Windows.Forms.AnchorStyles.Right;
-            this.guna2CirclePictureBox1.Image = global::CanvasApp.Properties.Resources.Screenshot_2026_04_21_011733;
+            this.guna2CirclePictureBox1.Image = global::CanvasApp.Client.Properties.Resources.Screenshot_2026_04_21_011733; // FIX
             this.guna2CirclePictureBox1.ImageRotate = 0F;
             this.guna2CirclePictureBox1.Location = new System.Drawing.Point(453, 13);
             this.guna2CirclePictureBox1.Name = "guna2CirclePictureBox1";
@@ -70,7 +59,7 @@
             // 
             // guna2CirclePictureBox2
             // 
-            this.guna2CirclePictureBox2.Image = global::CanvasApp.Properties.Resources.Screenshot_2026_04_21_021638;
+            this.guna2CirclePictureBox2.Image = global::CanvasApp.Client.Properties.Resources.Screenshot_2026_04_21_021638; // FIX
             this.guna2CirclePictureBox2.ImageRotate = 0F;
             this.guna2CirclePictureBox2.Location = new System.Drawing.Point(42, 85);
             this.guna2CirclePictureBox2.Name = "guna2CirclePictureBox2";
@@ -144,7 +133,6 @@
             ((System.ComponentModel.ISupportInitialize)(this.guna2CirclePictureBox1)).EndInit();
             ((System.ComponentModel.ISupportInitialize)(this.guna2CirclePictureBox2)).EndInit();
             this.ResumeLayout(false);
-
         }
 
         #endregion

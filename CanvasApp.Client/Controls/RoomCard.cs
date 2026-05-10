@@ -1,20 +1,17 @@
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System;
 using System.Windows.Forms;
 
-namespace CanvasApp
+namespace CanvasApp.Client
 {
     public partial class RoomCard : UserControl
     {
         private int currentPlayers = 0;
         private int maxPlayers = 8;
-        private string password;
+        private string _password;
+
+        /// <summary>ID của room ở server. Cần để ROOM_JOIN.</summary>
+        public string RoomId { get; set; }
+
         public string RoomName
         {
             get => lblRoomName.Text;
@@ -23,20 +20,15 @@ namespace CanvasApp
 
         public string Password
         {
-            get => password;
-            set => password = value;
+            get => _password;
+            set
+            {
+                _password = value;
+                lblPassword.Text = string.IsNullOrEmpty(value) ? "Public" : "🔒 Có mật khẩu";
+            }
         }
 
-        public string MaxText
-        {
-            get => lblPassword.Text;
-            set => lblPassword.Text = value;
-        }
-
-        public void JoinSuccess()
-        {
-            CurrentPlayers++;
-        }
+        public bool HasPassword => !string.IsNullOrEmpty(_password);
 
         public int MaxPlayers
         {
@@ -44,7 +36,6 @@ namespace CanvasApp
             set
             {
                 maxPlayers = value;
-                lblPassword.Text = $"Max: {maxPlayers}";
                 UpdatePlayerLabel();
             }
         }
@@ -64,15 +55,14 @@ namespace CanvasApp
         public RoomCard()
         {
             InitializeComponent();
-
             btnJoin.Click += (s, e) =>
             {
-                if (currentPlayers >= maxPlayers)
-                    return;
-
+                if (currentPlayers >= maxPlayers) return;
                 OnJoinClick?.Invoke(this, e);
             };
         }
+
+        public void JoinSuccess() => CurrentPlayers++;
 
         private void UpdatePlayerLabel()
         {
@@ -80,29 +70,11 @@ namespace CanvasApp
             btnJoin.Enabled = currentPlayers < maxPlayers;
         }
 
-        private void guna2Panel1_Paint(object sender, PaintEventArgs e)
-        {
-
-        }
-
-        private void guna2Panel1_Paint_1(object sender, PaintEventArgs e)
-        {
-
-        }
-
-        private void label1_Click(object sender, EventArgs e)
-        {
-
-        }
-
-        private void lblRoomName_Click(object sender, EventArgs e)
-        {
-
-        }
-
-        private void btnJoin_Click(object sender, EventArgs e)
-        {
-
-        }
+        // Designer event stubs
+        private void guna2Panel1_Paint(object sender, PaintEventArgs e) { }
+        private void guna2Panel1_Paint_1(object sender, PaintEventArgs e) { }
+        private void label1_Click(object sender, EventArgs e) { }
+        private void lblRoomName_Click(object sender, EventArgs e) { }
+        private void btnJoin_Click(object sender, EventArgs e) { }
     }
 }

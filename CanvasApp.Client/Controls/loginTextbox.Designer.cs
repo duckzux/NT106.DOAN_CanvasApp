@@ -1,4 +1,4 @@
-﻿namespace CanvasApp
+﻿namespace CanvasApp.Client
 {
     partial class loginTextbox
     {

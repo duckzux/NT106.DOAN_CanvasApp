@@ -1,20 +1,75 @@
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System;
 using System.Windows.Forms;
 
-namespace CanvasApp.Client.Forms
+namespace CanvasApp.Client
 {
     public partial class LoginForm : Form
     {
         public LoginForm()
         {
             InitializeComponent();
+            txtUsername.label = "Tài khoản";
+            txtPassword.label = "Mật khẩu";
+            txtPassword.isPassword = true;
+        }
+
+        private void Form1_Load(object sender, EventArgs e) { }
+        private void label2_Click(object sender, EventArgs e) { }
+        private void label3_Click(object sender, EventArgs e) { }
+        private void label4_Click(object sender, EventArgs e) { }
+        private void loginTextbox2_Load(object sender, EventArgs e) { }
+
+        private void lbReg_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
+        {
+            var regForm = new RegisterForm();
+            regForm.Show();
+            this.Hide();
+        }
+
+        private async void btnLogin_Click_1(object sender, EventArgs e)
+        {
+            string username = txtUsername.TextValue;
+            string password = txtPassword.TextValue;
+
+            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+            {
+                MessageBox.Show("Vui lòng nhập đầy đủ thông tin!", "Thông báo",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Disable UI khi đang login
+            btnLogin.Enabled = false;
+            btnLogin.Text = "Đang đăng nhập...";
+
+            var result = await AuthClient.LoginAsync(username, password);
+
+            btnLogin.Enabled = true;
+            btnLogin.Text = "Đăng nhập";
+
+            if (!result.Success)
+            {
+                MessageBox.Show(result.Message ?? "Đăng nhập thất bại", "Lỗi",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            // Lưu session
+            Session.CurrentUser = result.User;
+            Session.Token = result.Token;
+
+            // Kết nối persistent đến Canvas Server
+            bool connected = await CanvasClient.Instance.ConnectAsync();
+            if (!connected)
+            {
+                MessageBox.Show("Không kết nối được Canvas Server. Vui lòng kiểm tra server.",
+                    "Lỗi mạng", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var lobby = new LobbyForm();
+            lobby.Show();
+            this.Hide();
         }
     }
 }

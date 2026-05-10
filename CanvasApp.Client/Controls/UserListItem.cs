@@ -8,7 +8,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace CanvasApp.Client.Controls
+namespace CanvasApp.Client.Client.Controls
 {
     public partial class UserListItem : UserControl
     {

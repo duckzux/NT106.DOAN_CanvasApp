@@ -8,10 +8,11 @@
     <OutputType>Exe</OutputType>
     <RootNamespace>CanvasApp.AuthServer</RootNamespace>
     <AssemblyName>CanvasApp.AuthServer</AssemblyName>
-    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
     <Deterministic>true</Deterministic>
+    <TargetFrameworkProfile />
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <PlatformTarget>AnyCPU</PlatformTarget>
@@ -34,7 +35,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="BCrypt.Net-Next, Version=4.1.0.0, Culture=neutral, PublicKeyToken=1e11be04b6288443, processorArchitecture=MSIL">
-      <HintPath>..\packages\BCrypt.Net-Next.4.1.0\lib\net472\BCrypt.Net-Next.dll</HintPath>
+      <HintPath>..\packages\BCrypt.Net-Next.4.1.0\lib\net48\BCrypt.Net-Next.dll</HintPath>
     </Reference>
     <Reference Include="MetroFramework, Version=1.4.0.0, Culture=neutral, PublicKeyToken=5f91a84759bf584a, processorArchitecture=MSIL">
       <HintPath>..\packages\MetroModernUI.1.4.0.0\lib\net\MetroFramework.dll</HintPath>
@@ -117,6 +118,7 @@
     <Compile Include="Services\AuthService.cs" />
     <Compile Include="Services\TokenService.cs" />
     <Compile Include="Services\UserService.cs" />
+    <Compile Include="UserStore.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />

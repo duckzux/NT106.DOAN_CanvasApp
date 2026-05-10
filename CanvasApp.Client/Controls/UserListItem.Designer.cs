@@ -1,4 +1,4 @@
-﻿namespace CanvasApp.Client.Controls
+﻿namespace CanvasApp.Client.Client.Controls
 {
     partial class UserListItem
     {

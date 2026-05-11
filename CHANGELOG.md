@@ -18,9 +18,9 @@
 | `Services/AuthService.cs`  | Chức năng đăng nhập: gọi `UserStore.Login()` (xác thực BCrypt + cấp token), sau đó đóng gói kết quả thành `AUTH_LOGIN_RESULT`                         |
 | `Services/UserService.cs`  | Chức năng đăng ký: kiểm tra username ≥ 3 ký tự, password ≥ 6 ký tự, gọi `UserStore.Register()`, sau đó đóng gói kết quả thành `AUTH_REGISTER_RESULT`  |
 | `Services/TokenService.cs` | `CreateToken(user)` → tạo token dạng `Base64(id:username:unixTs)`; `ValidateToken(token)` → trả về `userId` hoặc `-1` (có kiểm tra TTL 24 giờ)        |
-| `Program.cs`               | Được tinh gọn còn: đọc config → tạo `UserStore` → tạo `AuthServer` → `await server.StartAsync()`                                                      |
+| `Program.cs`               | đọc config → tạo `UserStore` → tạo `AuthServer` → `await server.StartAsync()`                                                      |
 
-5. CanvasClient:
+1. CanvasClient:
 
 ### Heartbeat
 

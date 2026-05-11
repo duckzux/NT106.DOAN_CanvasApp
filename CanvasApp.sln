@@ -29,8 +29,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CanvasApp.LoadBalancer", "C
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Database", "Database", "{2ED3EF57-D17A-41E7-A24F-E0E04A1F9CDF}"
 	ProjectSection(SolutionItems) = preProject
-		schema.sql = schema.sql
-		seed_data.sql = seed_data.sql
+		Database\schema.sql = Database\schema.sql
+		Database\seed_data.sql = Database\seed_data.sql
 	EndProjectSection
 EndProject
 Global

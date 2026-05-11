@@ -6,7 +6,10 @@ using System.Threading.Tasks;
 
 namespace CanvasApp.Common.Models
 {
-    internal class RoomRole
+    public enum RoomRole
     {
+        Owner,   // Chủ phòng
+        Member,  // Thành viên
+        Viewer   // Người xem
     }
 }

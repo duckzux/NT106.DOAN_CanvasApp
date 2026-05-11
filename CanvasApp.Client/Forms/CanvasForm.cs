@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
+using CanvasApp.Client.Controls;
 using CanvasApp.Common;
 
 namespace CanvasApp.Client
@@ -20,19 +21,19 @@ namespace CanvasApp.Client
         private DrawAction _currentStroke;
 
         private Room _room;
+        private List<RoomMember> _initialMembers; // members lúc join (truyền từ LobbyForm)
 
         public CanvasForm()
         {
             InitializeComponent();
 
-            // Setup canvas bitmap
             this.Load += (s, e) => InitCanvas();
             canvasPanel.Paint += CanvasPanel_Paint;
             canvasPanel.MouseDown += Canvas_MouseDown;
             canvasPanel.MouseMove += Canvas_MouseMove;
             canvasPanel.MouseUp += Canvas_MouseUp;
 
-            // Tool buttons
+            // Tools
             btnPen.Click += (s, e) => _currentTool = "pen";
             btnEraser.Click += (s, e) => _currentTool = "eraser";
             btnClear.Click += async (s, e) =>
@@ -41,7 +42,7 @@ namespace CanvasApp.Client
                     MessageBoxButtons.YesNo) == DialogResult.Yes)
                 {
                     ClearCanvas();
-                    await CanvasClient.Instance.SendAsync(new CanvasApp.Common.Message(MessageType.DRAW_CLEAR));
+                    await CanvasClient.Instance.SendAsync(new Common.Message(MessageType.DRAW_CLEAR));
                 }
             };
             btnColor.Click += (s, e) =>
@@ -50,7 +51,6 @@ namespace CanvasApp.Client
                     _currentColor = colorDialog1.Color;
             };
 
-            // Color palette
             WirePaletteColors();
 
             // Chat
@@ -67,21 +67,24 @@ namespace CanvasApp.Client
                 this.Close();
             };
 
-            // Server message handler
-            CanvasClient.Instance.OnMessageReceived += new Action<CanvasApp.Common.Message>(OnServerMessage);
+            CanvasClient.Instance.OnMessageReceived += OnServerMessage;
         }
 
-        public void SetRoom(Room room, List<DrawAction> initialState)
+        public void SetRoom(Room room, List<DrawAction> initialState, List<RoomMember> initialMembers = null)
         {
             _room = room;
+            _initialMembers = initialMembers ?? new List<RoomMember>();
             this.Load += (s, e) =>
             {
                 lblRoomName.Text = room.Name;
                 lblRoomCode.Text = $"Mã: {room.Id}";
-                // Replay canvas state
                 foreach (var action in initialState)
                     DrawActionLocal(action);
                 canvasPanel.Invalidate();
+
+                // Populate user list lúc join
+                RenderUserList(_initialMembers);
+                AppendSystemMessage($"Bạn đã vào phòng '{room.Name}'.");
             };
         }
 
@@ -152,11 +155,8 @@ namespace CanvasApp.Client
         {
             if (!_isDrawing) return;
             _isDrawing = false;
-
-            // Gửi DRAW_END để server lưu state
             if (_currentStroke != null)
                 await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_END, _currentStroke);
-
             _currentStroke = null;
         }
 
@@ -164,7 +164,6 @@ namespace CanvasApp.Client
         private void DrawActionLocal(DrawAction action)
         {
             if (_graphics == null || action.Points == null || action.Points.Count < 2) return;
-
             for (int i = 1; i < action.Points.Count; i++)
                 DrawLineLocal(action.Points[i - 1], action.Points[i], action.Color, action.Thickness);
         }
@@ -178,7 +177,7 @@ namespace CanvasApp.Client
         }
 
         // ── Server message handler ──────────────────────────────────────
-        private void OnServerMessage(CanvasApp.Common.Message msg)
+        private void OnServerMessage(Common.Message msg)
         {
             if (this.IsDisposed) return;
             this.BeginInvoke((Action)(() =>
@@ -199,14 +198,43 @@ namespace CanvasApp.Client
 
                     case MessageType.CHAT_MESSAGE:
                         var chat = msg.GetData<ChatMessage>();
-                        rtbChatHistory.AppendText($"{chat.Username}: {chat.Text}\r\n");
+                        AppendChatMessage(chat.Username, chat.Text);
                         break;
 
                     case MessageType.ROOM_UPDATE:
-                        // Notification users joined/left - skip
+                        // ── Strongly-typed parse ────────────────────────
+                        var update = msg.GetData<RoomMembersUpdate>();
+                        if (update == null) break;
+
+                        // Cập nhật user list panel
+                        RenderUserList(update.Members);
+
+                        // Notification join/leave
+                        if (!string.IsNullOrEmpty(update.JoinedUsername))
+                            AppendSystemMessage($"{update.JoinedUsername} đã tham gia phòng.");
+                        if (!string.IsNullOrEmpty(update.LeftUsername))
+                            AppendSystemMessage($"{update.LeftUsername} đã rời phòng.");
                         break;
                 }
             }));
+        }
+
+        // ── Render user list vào pnlUserList ────────────────────────────
+        private void RenderUserList(List<RoomMember> members)
+        {
+            pnlUserList.Controls.Clear();
+            if (members == null) return;
+
+            int yPos = 5;
+            foreach (var m in members)
+            {
+                var item = new UserListItem();
+                item.Width = pnlUserList.Width - 10;   // set width TRƯỚC SetData để badge align đúng
+                item.SetData(m.Username ?? "Unknown", m.Role ?? "Member", m.AvatarColor ?? "#7856CF");
+                item.Location = new Point(5, yPos);
+                pnlUserList.Controls.Add(item);
+                yPos += item.Height + 5;
+            }
         }
 
         // ── Chat ────────────────────────────────────────────────────────
@@ -215,11 +243,49 @@ namespace CanvasApp.Client
             var text = txtMessageInput.Text?.Trim();
             if (string.IsNullOrEmpty(text)) return;
             await CanvasClient.Instance.SendChatAsync(text);
-            rtbChatHistory.AppendText($"Bạn: {text}\r\n");
             txtMessageInput.Clear();
+            // Không append local — server sẽ broadcast lại cho mình thấy
         }
 
-        // ── Color palette wiring ────────────────────────────────────────
+        private void AppendChatMessage(string user, string text)
+        {
+            if (this.InvokeRequired)
+            {
+                this.Invoke(new Action(() => AppendChatMessage(user, text)));
+                return;
+            }
+
+            bool isMe = user == Session.CurrentUser?.Username;
+            rtbChatHistory.SelectionStart = rtbChatHistory.TextLength;
+            rtbChatHistory.SelectionLength = 0;
+            rtbChatHistory.SelectionFont = new Font(rtbChatHistory.Font, FontStyle.Bold);
+            rtbChatHistory.SelectionColor = isMe ? Color.FromArgb(120, 86, 207) : Color.Black;
+            rtbChatHistory.AppendText($"{(isMe ? "Bạn" : user)}: ");
+            rtbChatHistory.SelectionFont = new Font(rtbChatHistory.Font, FontStyle.Regular);
+            rtbChatHistory.SelectionColor = rtbChatHistory.ForeColor;
+            rtbChatHistory.AppendText($"{text}\r\n");
+            rtbChatHistory.ScrollToCaret();
+        }
+
+        private void AppendSystemMessage(string message)
+        {
+            if (this.InvokeRequired)
+            {
+                this.Invoke(new Action(() => AppendSystemMessage(message)));
+                return;
+            }
+
+            rtbChatHistory.SelectionStart = rtbChatHistory.TextLength;
+            rtbChatHistory.SelectionLength = 0;
+            rtbChatHistory.SelectionColor = Color.DimGray;
+            rtbChatHistory.SelectionFont = new Font(rtbChatHistory.Font, FontStyle.Italic);
+            rtbChatHistory.AppendText($"[Hệ thống] {message}\r\n");
+            rtbChatHistory.SelectionColor = rtbChatHistory.ForeColor;
+            rtbChatHistory.SelectionFont = rtbChatHistory.Font;
+            rtbChatHistory.ScrollToCaret();
+        }
+
+        // ── Color palette ───────────────────────────────────────────────
         private void WirePaletteColors()
         {
             pnlColorBlack.Click += (s, e) => _currentColor = Color.Black;
@@ -236,7 +302,6 @@ namespace CanvasApp.Client
             pnlColorWhite.Click += (s, e) => _currentColor = Color.White;
         }
 
-        // ── Helpers ─────────────────────────────────────────────────────
         private static string ColorToHex(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
         private static Color HexToColor(string hex)
         {

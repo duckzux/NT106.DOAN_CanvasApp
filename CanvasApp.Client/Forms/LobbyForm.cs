@@ -104,7 +104,7 @@ namespace CanvasApp.Client
 
             flowLayoutPanel1.Controls.Add(card);
         }
-            
+
         // ── Join logic ──────────────────────────────────────────────────
         private async void JoinRoom(RoomCard card, string password)
         {
@@ -121,9 +121,9 @@ namespace CanvasApp.Client
                 return;
             }
 
-            // Mở CanvasForm với roomId
+            // Mở CanvasForm với roomId + danh sách members hiện tại
             var canvas = new CanvasForm();
-            canvas.SetRoom(res.Room, res.CanvasState);
+            canvas.SetRoom(res.Room, res.CanvasState, res.Members);
             canvas.Show();
             this.Hide();
 
@@ -169,7 +169,7 @@ namespace CanvasApp.Client
             createRoom.BringToFront();
         }
 
-        private void btnLogout_Click(object sender, EventArgs e)
+        private async void btnLogout_Click(object sender, EventArgs e)
         {
             CanvasClient.Instance.OnMessageReceived -= OnServerMessage;
             CanvasClient.Instance.OnDisconnected -= OnDisconnected;

@@ -6,7 +6,15 @@ using System.Threading.Tasks;
 
 namespace CanvasApp.Common.Models
 {
-    internal class Room
+    public class Room
     {
+        public string RoomId { get; set; }
+        public string RoomName { get; set; }
+        public List<User> Users { get; set; }
+
+        public Room()
+        {
+            Users = new List<User>();
+        }
     }
 }

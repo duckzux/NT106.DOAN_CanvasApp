@@ -1,4 +1,5 @@
 using System;
+using System.Configuration;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -15,7 +16,26 @@ namespace CanvasApp.AuthServer
 
         static async Task Main(string[] args)
         {
-            _store = new UserStore("users.json");
+            var connectionString = ConfigurationManager.ConnectionStrings["CanvasDb"]?.ConnectionString;
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                Console.WriteLine("[ERROR] Connection string 'CanvasDb' not found in App.config");
+                Console.WriteLine("  Example: Server=localhost;Port=3306;Database=canvasapp;Uid=root;Pwd=;CharSet=utf8mb4;SslMode=None;");
+                Console.ReadKey();
+                return;
+            }
+
+            try
+            {
+                _store = new UserStore(connectionString);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ERROR] Cannot connect to database: {ex.Message}");
+                Console.WriteLine("  Make sure MySQL is running and the connection string in App.config is correct.");
+                Console.ReadKey();
+                return;
+            }
 
             var listener = new TcpListener(IPAddress.Any, PORT);
             listener.Start();

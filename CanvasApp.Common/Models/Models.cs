@@ -10,7 +10,6 @@ namespace CanvasApp.Common
         [JsonProperty("username")] public string Username { get; set; }
         [JsonProperty("email")] public string Email { get; set; }
         [JsonProperty("avatarColor")] public string AvatarColor { get; set; } = "#7856CF";
-        // PasswordHash chỉ tồn tại ở server, không gửi qua mạng
         [JsonIgnore] public string PasswordHash { get; set; }
     }
 
@@ -26,8 +25,24 @@ namespace CanvasApp.Common
         [JsonProperty("currentUsers")] public int CurrentUsers { get; set; }
         [JsonProperty("createdAt")] public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
-        // Server-side only
         [JsonIgnore] public string PasswordHash { get; set; }
+    }
+
+    /// <summary>1 user đang trong room.</summary>
+    public class RoomMember
+    {
+        [JsonProperty("userId")] public int UserId { get; set; }
+        [JsonProperty("username")] public string Username { get; set; }
+        [JsonProperty("role")] public string Role { get; set; } = "Member";   // Owner | Member | Viewer
+        [JsonProperty("avatarColor")] public string AvatarColor { get; set; } = "#6c5ce7";
+    }
+
+    /// <summary>Broadcast khi có thay đổi membership trong room.</summary>
+    public class RoomMembersUpdate
+    {
+        [JsonProperty("members")] public List<RoomMember> Members { get; set; } = new List<RoomMember>();
+        [JsonProperty("joinedUsername")] public string JoinedUsername { get; set; }   // null nếu không phải join event
+        [JsonProperty("leftUsername")] public string LeftUsername { get; set; }       // null nếu không phải leave event
     }
 
     // ── Auth payloads ────────────────────────────────────────────────
@@ -79,6 +94,7 @@ namespace CanvasApp.Common
         public string Message { get; set; }
         public Room Room { get; set; }
         public List<DrawAction> CanvasState { get; set; } = new List<DrawAction>();
+        public List<RoomMember> Members { get; set; } = new List<RoomMember>();
     }
 
     public class RoomListResult
@@ -89,7 +105,7 @@ namespace CanvasApp.Common
     // ── Draw action ──────────────────────────────────────────────────
     public class DrawAction
     {
-        [JsonProperty("type")] public string Type { get; set; }   // pen, rect, circle, line, text...
+        [JsonProperty("type")] public string Type { get; set; }
         [JsonProperty("userId")] public int UserId { get; set; }
         [JsonProperty("color")] public string Color { get; set; }
         [JsonProperty("thickness")] public int Thickness { get; set; }

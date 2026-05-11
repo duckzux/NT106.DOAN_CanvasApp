@@ -17,19 +17,64 @@ namespace CanvasApp.Client
 
         private void InitializeComponent()
         {
+            this.components = new System.ComponentModel.Container();
+            this.pnlTopBar = new Guna.UI2.WinForms.Guna2Panel();
+            this.ctrlMinimize = new Guna.UI2.WinForms.Guna2ControlBox();
+            this.ctrlClose = new Guna.UI2.WinForms.Guna2ControlBox();
+            this.guna2DragControl1 = new Guna.UI2.WinForms.Guna2DragControl(this.components);
             this.label3 = new System.Windows.Forms.Label();
             this.btnLogin = new Guna.UI2.WinForms.Guna2Button();
             this.label4 = new System.Windows.Forms.Label();
             this.lbReg = new System.Windows.Forms.LinkLabel();
-            this.txtPassword = new loginTextbox();          // FIX: bỏ "CanvasApp."
-            this.gradientPanel1 = new GradientPanel();      // FIX: bỏ "CanvasApp."
+            this.txtPassword = new loginTextbox();
+            this.gradientPanel1 = new GradientPanel();
             this.label2 = new System.Windows.Forms.Label();
             this.pictureBox1 = new System.Windows.Forms.PictureBox();
             this.label1 = new System.Windows.Forms.Label();
-            this.txtUsername = new loginTextbox();          // FIX: bỏ "CanvasApp."
+            this.txtUsername = new loginTextbox();
+            this.pnlTopBar.SuspendLayout();
             this.gradientPanel1.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.pictureBox1)).BeginInit();
             this.SuspendLayout();
+            // 
+            // pnlTopBar
+            // 
+            this.pnlTopBar.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
+            this.pnlTopBar.Controls.Add(this.ctrlMinimize);
+            this.pnlTopBar.Controls.Add(this.ctrlClose);
+            this.pnlTopBar.Dock = System.Windows.Forms.DockStyle.Top;
+            this.pnlTopBar.Location = new System.Drawing.Point(0, 0);
+            this.pnlTopBar.Name = "pnlTopBar";
+            this.pnlTopBar.Size = new System.Drawing.Size(1280, 30);
+            this.pnlTopBar.TabIndex = 0;
+            // 
+            // ctrlMinimize
+            // 
+            this.ctrlMinimize.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
+            this.ctrlMinimize.ControlBoxType = Guna.UI2.WinForms.Enums.ControlBoxType.MinimizeBox;
+            this.ctrlMinimize.FillColor = System.Drawing.Color.Transparent;
+            this.ctrlMinimize.IconColor = System.Drawing.Color.White;
+            this.ctrlMinimize.Location = new System.Drawing.Point(1190, 0);
+            this.ctrlMinimize.Name = "ctrlMinimize";
+            this.ctrlMinimize.Size = new System.Drawing.Size(45, 30);
+            this.ctrlMinimize.TabIndex = 1;
+            // 
+            // ctrlClose
+            // 
+            this.ctrlClose.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
+            this.ctrlClose.FillColor = System.Drawing.Color.Transparent;
+            this.ctrlClose.HoverState.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(232)))), ((int)(((byte)(17)))), ((int)(((byte)(35)))));
+            this.ctrlClose.IconColor = System.Drawing.Color.White;
+            this.ctrlClose.Location = new System.Drawing.Point(1235, 0);
+            this.ctrlClose.Name = "ctrlClose";
+            this.ctrlClose.Size = new System.Drawing.Size(45, 30);
+            this.ctrlClose.TabIndex = 0;
+            // 
+            // guna2DragControl1
+            // 
+            this.guna2DragControl1.DockIndicatorTransparencyValue = 0.6D;
+            this.guna2DragControl1.TargetControl = this.pnlTopBar;
+            this.guna2DragControl1.UseTransparentDrag = true;
             // 
             // label3
             // 
@@ -37,7 +82,7 @@ namespace CanvasApp.Client
             this.label3.BackColor = System.Drawing.Color.Transparent;
             this.label3.Font = new System.Drawing.Font("Montserrat", 16.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.label3.ForeColor = System.Drawing.Color.Black;
-            this.label3.Location = new System.Drawing.Point(743, 149);
+            this.label3.Location = new System.Drawing.Point(743, 179);
             this.label3.Name = "label3";
             this.label3.Size = new System.Drawing.Size(411, 44);
             this.label3.TabIndex = 1;
@@ -54,7 +99,7 @@ namespace CanvasApp.Client
             this.btnLogin.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
             this.btnLogin.Font = new System.Drawing.Font("Montserrat", 10.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.btnLogin.ForeColor = System.Drawing.Color.White;
-            this.btnLogin.Location = new System.Drawing.Point(751, 494);
+            this.btnLogin.Location = new System.Drawing.Point(751, 524);
             this.btnLogin.Name = "btnLogin";
             this.btnLogin.Size = new System.Drawing.Size(431, 54);
             this.btnLogin.TabIndex = 4;
@@ -67,7 +112,7 @@ namespace CanvasApp.Client
             this.label4.BackColor = System.Drawing.Color.Transparent;
             this.label4.Font = new System.Drawing.Font("Montserrat", 10.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.label4.ForeColor = System.Drawing.Color.Black;
-            this.label4.Location = new System.Drawing.Point(826, 655);
+            this.label4.Location = new System.Drawing.Point(826, 685);
             this.label4.Name = "label4";
             this.label4.Size = new System.Drawing.Size(174, 27);
             this.label4.TabIndex = 5;
@@ -79,7 +124,7 @@ namespace CanvasApp.Client
             this.lbReg.AutoSize = true;
             this.lbReg.Font = new System.Drawing.Font("Montserrat", 10.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.lbReg.LinkColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
-            this.lbReg.Location = new System.Drawing.Point(1015, 655);
+            this.lbReg.Location = new System.Drawing.Point(1015, 685);
             this.lbReg.Name = "lbReg";
             this.lbReg.Size = new System.Drawing.Size(82, 27);
             this.lbReg.TabIndex = 6;
@@ -92,7 +137,7 @@ namespace CanvasApp.Client
             this.txtPassword.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
             this.txtPassword.isPassword = false;
             this.txtPassword.label = "Mật khẩu";
-            this.txtPassword.Location = new System.Drawing.Point(751, 375);
+            this.txtPassword.Location = new System.Drawing.Point(751, 405);
             this.txtPassword.Name = "txtPassword";
             this.txtPassword.Padding = new System.Windows.Forms.Padding(0, 0, 0, 1);
             this.txtPassword.Size = new System.Drawing.Size(431, 68);
@@ -107,10 +152,10 @@ namespace CanvasApp.Client
             this.gradientPanel1.Controls.Add(this.label1);
             this.gradientPanel1.gradientBottom = System.Drawing.Color.FromArgb(((int)(((byte)(174)))), ((int)(((byte)(145)))), ((int)(((byte)(255)))));
             this.gradientPanel1.gradientTop = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
-            this.gradientPanel1.Location = new System.Drawing.Point(0, -1);
+            this.gradientPanel1.Location = new System.Drawing.Point(0, 30);
             this.gradientPanel1.Name = "gradientPanel1";
-            this.gradientPanel1.Size = new System.Drawing.Size(617, 750);
-            this.gradientPanel1.TabIndex = 0;
+            this.gradientPanel1.Size = new System.Drawing.Size(617, 720);
+            this.gradientPanel1.TabIndex = 7;
             // 
             // label2
             // 
@@ -128,7 +173,7 @@ namespace CanvasApp.Client
             // pictureBox1
             // 
             this.pictureBox1.BackColor = System.Drawing.Color.Transparent;
-            this.pictureBox1.Image = global::CanvasApp.Client.Properties.Resources.whitever; // FIX: CanvasApp → CanvasApp.Client
+            this.pictureBox1.Image = global::CanvasApp.Client.Properties.Resources.whitever;
             this.pictureBox1.Location = new System.Drawing.Point(126, 192);
             this.pictureBox1.Name = "pictureBox1";
             this.pictureBox1.Size = new System.Drawing.Size(336, 252);
@@ -153,7 +198,7 @@ namespace CanvasApp.Client
             this.txtUsername.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
             this.txtUsername.isPassword = false;
             this.txtUsername.label = "Tài khoản";
-            this.txtUsername.Location = new System.Drawing.Point(751, 246);
+            this.txtUsername.Location = new System.Drawing.Point(751, 276);
             this.txtUsername.Name = "txtUsername";
             this.txtUsername.Padding = new System.Windows.Forms.Padding(0, 0, 0, 1);
             this.txtUsername.Size = new System.Drawing.Size(431, 68);
@@ -165,7 +210,8 @@ namespace CanvasApp.Client
             this.AutoScaleDimensions = new System.Drawing.SizeF(8F, 16F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.BackColor = System.Drawing.Color.White;
-            this.ClientSize = new System.Drawing.Size(1280, 720);
+            this.ClientSize = new System.Drawing.Size(1280, 750);
+            this.Controls.Add(this.pnlTopBar);
             this.Controls.Add(this.lbReg);
             this.Controls.Add(this.label4);
             this.Controls.Add(this.btnLogin);
@@ -180,6 +226,7 @@ namespace CanvasApp.Client
             this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
             this.Text = "LoginForm";
             this.Load += new System.EventHandler(this.Form1_Load);
+            this.pnlTopBar.ResumeLayout(false);
             this.gradientPanel1.ResumeLayout(false);
             this.gradientPanel1.PerformLayout();
             ((System.ComponentModel.ISupportInitialize)(this.pictureBox1)).EndInit();
@@ -189,6 +236,10 @@ namespace CanvasApp.Client
 
         #endregion
 
+        private Guna.UI2.WinForms.Guna2Panel pnlTopBar;
+        private Guna.UI2.WinForms.Guna2ControlBox ctrlMinimize;
+        private Guna.UI2.WinForms.Guna2ControlBox ctrlClose;
+        private Guna.UI2.WinForms.Guna2DragControl guna2DragControl1;
         private GradientPanel gradientPanel1;
         private System.Windows.Forms.Label label1;
         private System.Windows.Forms.PictureBox pictureBox1;

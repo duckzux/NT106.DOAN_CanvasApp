@@ -55,10 +55,21 @@ namespace CanvasApp.Server
             }
             finally
             {
+                // Khi disconnect: leave room, broadcast cập nhật cho người còn lại
+                var leftRoomId = client.CurrentRoomId;
+                var leftUsername = client.Username;
                 _roomManager.Leave(client);
-                if (!string.IsNullOrEmpty(client.CurrentRoomId))
-                    await _roomManager.BroadcastAsync(client.CurrentRoomId,
-                        new Message(MessageType.ROOM_UPDATE, new { left = client.Username }));
+
+                if (!string.IsNullOrEmpty(leftRoomId))
+                {
+                    await _roomManager.BroadcastAsync(leftRoomId,
+                        new Message(MessageType.ROOM_UPDATE, new RoomMembersUpdate
+                        {
+                            Members = _roomManager.GetMembers(leftRoomId),
+                            LeftUsername = leftUsername
+                        }));
+                }
+
                 tcp.Close();
                 Console.WriteLine($"[-] {endpoint} disconnected");
             }
@@ -70,7 +81,6 @@ namespace CanvasApp.Server
             {
                 var msg = Message.FromJson(raw);
 
-                // Verify token cho mọi message (trừ PING)
                 if (msg.Type != MessageType.PING)
                 {
                     int userId = AuthServer.UserStore.VerifyToken(msg.Token ?? "");
@@ -82,9 +92,8 @@ namespace CanvasApp.Server
                     if (client.UserId == 0)
                     {
                         client.UserId = userId;
-                        // Decode username từ token
-                        var raw2 = Encoding.UTF8.GetString(Convert.FromBase64String(msg.Token));
-                        client.Username = raw2.Split(':')[1];
+                        var rawTok = Encoding.UTF8.GetString(Convert.FromBase64String(msg.Token));
+                        client.Username = rawTok.Split(':')[1];
                     }
                 }
 
@@ -105,19 +114,32 @@ namespace CanvasApp.Server
                         var joinReq = msg.GetData<JoinRoomRequest>();
                         var joinRes = _roomManager.Join(joinReq, client);
                         await client.SendAsync(new Message(MessageType.ROOM_JOIN_RESULT, joinRes));
+
+                        // Broadcast cập nhật members cho TẤT CẢ user trong room (gồm cả người vừa join)
                         if (joinRes.Success)
                         {
                             await _roomManager.BroadcastAsync(joinRes.Room.Id,
-                                new Message(MessageType.ROOM_UPDATE, new { joined = client.Username }), client);
+                                new Message(MessageType.ROOM_UPDATE, new RoomMembersUpdate
+                                {
+                                    Members = _roomManager.GetMembers(joinRes.Room.Id),
+                                    JoinedUsername = client.Username
+                                }), sender: client);  // sender = client để client tự cập nhật từ joinRes
                         }
                         break;
 
                     case MessageType.ROOM_LEAVE:
-                        var leftRoomId = client.CurrentRoomId;
+                        var leftRoom = client.CurrentRoomId;
+                        var leftName = client.Username;
                         _roomManager.Leave(client);
-                        if (!string.IsNullOrEmpty(leftRoomId))
-                            await _roomManager.BroadcastAsync(leftRoomId,
-                                new Message(MessageType.ROOM_UPDATE, new { left = client.Username }));
+                        if (!string.IsNullOrEmpty(leftRoom))
+                        {
+                            await _roomManager.BroadcastAsync(leftRoom,
+                                new Message(MessageType.ROOM_UPDATE, new RoomMembersUpdate
+                                {
+                                    Members = _roomManager.GetMembers(leftRoom),
+                                    LeftUsername = leftName
+                                }));
+                        }
                         break;
 
                     case MessageType.DRAW_START:
@@ -127,7 +149,6 @@ namespace CanvasApp.Server
                     case MessageType.DRAW_TEXT:
                         if (!string.IsNullOrEmpty(client.CurrentRoomId))
                         {
-                            // Lưu state khi DRAW_END/DRAW_SHAPE/DRAW_TEXT
                             if (msg.Type != MessageType.DRAW_START && msg.Type != MessageType.DRAW_MOVE)
                             {
                                 var action = msg.GetData<DrawAction>();
@@ -153,6 +174,7 @@ namespace CanvasApp.Server
                             chat.UserId = client.UserId;
                             chat.Username = client.Username;
                             chat.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                            // Broadcast TẤT CẢ (kể cả sender) để mọi người thấy giống nhau
                             await _roomManager.BroadcastAsync(client.CurrentRoomId,
                                 new Message(MessageType.CHAT_MESSAGE, chat));
                         }

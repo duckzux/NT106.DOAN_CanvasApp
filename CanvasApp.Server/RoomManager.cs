@@ -10,9 +10,6 @@ using CanvasApp.Common;
 
 namespace CanvasApp.Server
 {
-    /// <summary>
-    /// Đại diện 1 client đang kết nối đến Canvas Server.
-    /// </summary>
     public class ConnectedClient
     {
         public int UserId { get; set; }
@@ -32,9 +29,6 @@ namespace CanvasApp.Server
         }
     }
 
-    /// <summary>
-    /// Quản lý toàn bộ room + canvas state. Thread-safe.
-    /// </summary>
     public class RoomManager
     {
         private readonly ConcurrentDictionary<string, Room> _rooms = new ConcurrentDictionary<string, Room>();
@@ -95,7 +89,8 @@ namespace CanvasApp.Server
                 Success = true,
                 Message = "OK",
                 Room = room,
-                CanvasState = _canvasState.TryGetValue(room.Id, out var state) ? state.ToList() : new List<DrawAction>()
+                CanvasState = _canvasState.TryGetValue(room.Id, out var state) ? state.ToList() : new List<DrawAction>(),
+                Members = GetMembers(room.Id)
             };
         }
 
@@ -116,7 +111,32 @@ namespace CanvasApp.Server
             client.CurrentRoomId = null;
         }
 
-        /// <summary>Broadcast message đến toàn bộ client trong room (trừ sender).</summary>
+        /// <summary>Lấy danh sách members hiện tại của 1 room (kèm role).</summary>
+        public List<RoomMember> GetMembers(string roomId)
+        {
+            var members = new List<RoomMember>();
+            if (!_roomClients.TryGetValue(roomId, out var list)) return members;
+            if (!_rooms.TryGetValue(roomId, out var room)) return members;
+
+            ConnectedClient[] snapshot;
+            lock (list) { snapshot = list.ToArray(); }
+
+            // Color preset cho avatar
+            var colors = new[] { "#7856CF", "#F9A826", "#0DBF7E", "#E74C3C", "#3498DB", "#9B59B6", "#1ABC9C", "#E67E22" };
+
+            foreach (var c in snapshot)
+            {
+                members.Add(new RoomMember
+                {
+                    UserId = c.UserId,
+                    Username = c.Username,
+                    Role = c.UserId == room.OwnerId ? "Owner" : "Member",
+                    AvatarColor = colors[Math.Abs((c.Username ?? "").GetHashCode()) % colors.Length]
+                });
+            }
+            return members;
+        }
+
         public async Task BroadcastAsync(string roomId, Message msg, ConnectedClient sender = null)
         {
             if (!_roomClients.TryGetValue(roomId, out var list)) return;
@@ -129,7 +149,6 @@ namespace CanvasApp.Server
             }
         }
 
-        /// <summary>Lưu draw action vào canvas state để client mới join có thể replay.</summary>
         public void RecordDrawAction(string roomId, DrawAction action)
         {
             if (!_canvasState.TryGetValue(roomId, out var state)) return;

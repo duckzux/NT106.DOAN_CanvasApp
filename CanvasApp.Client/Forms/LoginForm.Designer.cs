@@ -26,12 +26,12 @@ namespace CanvasApp.Client
             this.btnLogin = new Guna.UI2.WinForms.Guna2Button();
             this.label4 = new System.Windows.Forms.Label();
             this.lbReg = new System.Windows.Forms.LinkLabel();
-            this.txtPassword = new loginTextbox();
-            this.gradientPanel1 = new GradientPanel();
+            this.txtPassword = new CanvasApp.Client.loginTextbox();
+            this.gradientPanel1 = new CanvasApp.Client.GradientPanel();
             this.label2 = new System.Windows.Forms.Label();
             this.pictureBox1 = new System.Windows.Forms.PictureBox();
             this.label1 = new System.Windows.Forms.Label();
-            this.txtUsername = new loginTextbox();
+            this.txtUsername = new CanvasApp.Client.loginTextbox();
             this.pnlTopBar.SuspendLayout();
             this.gradientPanel1.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.pictureBox1)).BeginInit();
@@ -80,11 +80,11 @@ namespace CanvasApp.Client
             // 
             this.label3.AutoSize = true;
             this.label3.BackColor = System.Drawing.Color.Transparent;
-            this.label3.Font = new System.Drawing.Font("Montserrat", 16.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.label3.Font = new System.Drawing.Font("Microsoft Sans Serif", 16.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.label3.ForeColor = System.Drawing.Color.Black;
             this.label3.Location = new System.Drawing.Point(743, 179);
             this.label3.Name = "label3";
-            this.label3.Size = new System.Drawing.Size(411, 44);
+            this.label3.Size = new System.Drawing.Size(395, 32);
             this.label3.TabIndex = 1;
             this.label3.Text = "SIGN IN TO YOUR ACCOUNT";
             this.label3.Click += new System.EventHandler(this.label3_Click);
@@ -97,7 +97,7 @@ namespace CanvasApp.Client
             this.btnLogin.DisabledState.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(169)))), ((int)(((byte)(169)))), ((int)(((byte)(169)))));
             this.btnLogin.DisabledState.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(141)))), ((int)(((byte)(141)))), ((int)(((byte)(141)))));
             this.btnLogin.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
-            this.btnLogin.Font = new System.Drawing.Font("Montserrat", 10.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.btnLogin.Font = new System.Drawing.Font("Microsoft Sans Serif", 10.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.btnLogin.ForeColor = System.Drawing.Color.White;
             this.btnLogin.Location = new System.Drawing.Point(751, 524);
             this.btnLogin.Name = "btnLogin";
@@ -110,11 +110,11 @@ namespace CanvasApp.Client
             // 
             this.label4.AutoSize = true;
             this.label4.BackColor = System.Drawing.Color.Transparent;
-            this.label4.Font = new System.Drawing.Font("Montserrat", 10.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.label4.Font = new System.Drawing.Font("Microsoft Sans Serif", 10.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.label4.ForeColor = System.Drawing.Color.Black;
             this.label4.Location = new System.Drawing.Point(826, 685);
             this.label4.Name = "label4";
-            this.label4.Size = new System.Drawing.Size(174, 27);
+            this.label4.Size = new System.Drawing.Size(152, 20);
             this.label4.TabIndex = 5;
             this.label4.Text = "Chưa có tài khoản?";
             this.label4.Click += new System.EventHandler(this.label4_Click);
@@ -122,11 +122,11 @@ namespace CanvasApp.Client
             // lbReg
             // 
             this.lbReg.AutoSize = true;
-            this.lbReg.Font = new System.Drawing.Font("Montserrat", 10.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.lbReg.Font = new System.Drawing.Font("Microsoft Sans Serif", 10.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.lbReg.LinkColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
             this.lbReg.Location = new System.Drawing.Point(1015, 685);
             this.lbReg.Name = "lbReg";
-            this.lbReg.Size = new System.Drawing.Size(82, 27);
+            this.lbReg.Size = new System.Drawing.Size(69, 20);
             this.lbReg.TabIndex = 6;
             this.lbReg.TabStop = true;
             this.lbReg.Text = "Đăng ký";
@@ -160,11 +160,11 @@ namespace CanvasApp.Client
             // label2
             // 
             this.label2.BackColor = System.Drawing.Color.Transparent;
-            this.label2.Font = new System.Drawing.Font("Montserrat", 12F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.label2.Font = new System.Drawing.Font("Microsoft Sans Serif", 12F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.label2.ForeColor = System.Drawing.Color.White;
             this.label2.Location = new System.Drawing.Point(74, 461);
             this.label2.Name = "label2";
-            this.label2.Size = new System.Drawing.Size(488, 136);
+            this.label2.Size = new System.Drawing.Size(474, 136);
             this.label2.TabIndex = 1;
             this.label2.Text = "Nền tảng bảng trắng thời gian thực cho đội nhóm. Phác thảo ý tưởng, truyền file v" +
     "à cộng tác mọi lúc.";
@@ -185,11 +185,11 @@ namespace CanvasApp.Client
             // 
             this.label1.AutoSize = true;
             this.label1.BackColor = System.Drawing.Color.Transparent;
-            this.label1.Font = new System.Drawing.Font("Montserrat", 19.8F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.label1.Font = new System.Drawing.Font("Microsoft Sans Serif", 19.8F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.label1.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(248)))), ((int)(((byte)(245)))), ((int)(((byte)(255)))));
             this.label1.Location = new System.Drawing.Point(149, 150);
             this.label1.Name = "label1";
-            this.label1.Size = new System.Drawing.Size(260, 52);
+            this.label1.Size = new System.Drawing.Size(242, 38);
             this.label1.TabIndex = 0;
             this.label1.Text = "WELCOME TO";
             // 
@@ -232,6 +232,7 @@ namespace CanvasApp.Client
             ((System.ComponentModel.ISupportInitialize)(this.pictureBox1)).EndInit();
             this.ResumeLayout(false);
             this.PerformLayout();
+
         }
 
         #endregion

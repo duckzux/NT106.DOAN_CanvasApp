@@ -650,8 +650,9 @@ namespace CanvasApp.Client
             "50",
             "72"});
             this.tscbSize.Name = "tscbSize";
-            this.tscbSize.Size = new System.Drawing.Size(41, 25);
+            this.tscbSize.Size = new System.Drawing.Size(41, 23);
             this.tscbSize.Text = " ⚫";
+            this.tscbSize.TextChanged += new System.EventHandler(this.tscbSize_TextChanged);
             // 
             // colorDialog1
             // 

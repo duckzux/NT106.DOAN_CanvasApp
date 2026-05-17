@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Web.Configuration;
 using System.Windows.Forms;
 using CanvasApp.Client.Controls;
 using CanvasApp.Common;
@@ -26,6 +27,13 @@ namespace CanvasApp.Client
         public CanvasForm()
         {
             InitializeComponent();
+
+            //Chống nhấp nháy màn hình khi vẽ 
+            typeof(Panel).InvokeMember("DoubleBuffered",
+                System.Reflection.BindingFlags.SetProperty |
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic,
+                null, canvasPanel, new object[] { true });
 
             this.Load += (s, e) => InitCanvas();
             canvasPanel.Paint += CanvasPanel_Paint;
@@ -119,12 +127,14 @@ namespace CanvasApp.Client
             _isDrawing = true;
             _lastPoint = new Common.PointF(e.X, e.Y);
 
+            int currentThickness = _currentTool == "eraser" ? _thickness * 2 : _thickness;
+
             _currentStroke = new DrawAction
             {
                 Type = _currentTool,
-                Color = ColorToHex(_currentTool == "eraser" ? Color.White : _currentColor),
-                Thickness = _currentTool == "eraser" ? 20 : _thickness,
-                Points = new List<Common.PointF> { _lastPoint }
+                Color = ColorToHex(_currentTool == "earaser" ? Color.White : _currentColor),
+                Thickness = currentThickness,
+                Points = new List<Common.PointF> {  _lastPoint}
             };
 
             await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_START, _currentStroke);
@@ -322,6 +332,15 @@ namespace CanvasApp.Client
         {
             CanvasClient.Instance.OnMessageReceived -= OnServerMessage;
             base.OnFormClosed(e);
+        }
+
+        //brush-size
+        private void tscbSize_TextChanged(object sender, EventArgs e)
+        {
+            if (int.TryParse(tscbSize.Text, out int newSize))
+            {
+                _thickness = newSize;
+            }
         }
     }
 }

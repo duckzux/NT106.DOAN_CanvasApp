@@ -19,6 +19,7 @@ namespace CanvasApp.Client
         private int _thickness = 3;
         private string _currentTool = "pen";
         private DrawAction _currentStroke;
+        private Image _bgImage = null;
 
         private Room _room;
         private List<RoomMember> _initialMembers; // members lúc join (truyền từ LobbyForm)
@@ -36,6 +37,45 @@ namespace CanvasApp.Client
             // Tools
             btnPen.Click += (s, e) => _currentTool = "pen";
             btnEraser.Click += (s, e) => _currentTool = "eraser";
+            btnImportBg.Click += (s, e) =>
+            {
+                using (OpenFileDialog openFileDialog = new OpenFileDialog())
+                {
+                    openFileDialog.Filter = "Image Files(*.BMP;*.JPG;*.JPEG;*.PNG)|*.BMP;*.JPG;*.JPEG;*.PNG";
+                    openFileDialog.Title = "Chọn ảnh nền cho Canvas";
+
+                    if (openFileDialog.ShowDialog() == DialogResult.OK)
+                    {
+                        _bgImage = Image.FromFile(openFileDialog.FileName);
+                        canvasPanel.Invalidate();
+                    }
+                }
+            };
+            btnExport.Click += (s, e) =>
+            {
+                using (SaveFileDialog saveFileDialog = new SaveFileDialog())
+                {
+                    saveFileDialog.Filter = "PNG Image|*.png|JPEG Image|*.jpg";
+                    saveFileDialog.Title = "Xuất bản vẽ ra file ảnh";
+                    saveFileDialog.FileName = "my_canvas_export"; 
+
+                    if (saveFileDialog.ShowDialog() == DialogResult.OK)
+                    {
+                        Bitmap bmp = new Bitmap(canvasPanel.Width, canvasPanel.Height);
+                        canvasPanel.DrawToBitmap(bmp, new Rectangle(0, 0, canvasPanel.Width, canvasPanel.Height));
+                        System.Drawing.Imaging.ImageFormat format = System.Drawing.Imaging.ImageFormat.Png;
+
+                        if (saveFileDialog.FilterIndex == 2)
+                        {
+                            format = System.Drawing.Imaging.ImageFormat.Jpeg;
+                        }
+                        bmp.Save(saveFileDialog.FileName, format);
+                        bmp.Dispose();
+
+                        MessageBox.Show("Đã xuất ảnh thành công rùi nha Nguyên ơi! 🎉", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                }
+            };
             btnClear.Click += async (s, e) =>
             {
                 if (MessageBox.Show("Xóa toàn bộ canvas?", "Xác nhận",
@@ -93,7 +133,7 @@ namespace CanvasApp.Client
         {
             _bitmap = new Bitmap(Math.Max(canvasPanel.Width, 100), Math.Max(canvasPanel.Height, 100));
             _graphics = Graphics.FromImage(_bitmap);
-            _graphics.Clear(Color.White);
+            _graphics.Clear(Color.Transparent);
             _graphics.SmoothingMode = SmoothingMode.AntiAlias;
             canvasPanel.Invalidate();
         }
@@ -109,7 +149,14 @@ namespace CanvasApp.Client
 
         private void CanvasPanel_Paint(object sender, PaintEventArgs e)
         {
-            if (_bitmap != null) e.Graphics.DrawImage(_bitmap, 0, 0);
+            if (_bgImage != null)
+            {
+                e.Graphics.DrawImage(_bgImage, 0, 0, _bgImage.Width, _bgImage.Height);
+            }
+            if (_bitmap != null)
+            {
+                e.Graphics.DrawImage(_bitmap, 0, 0);
+            }
         }
 
         // ── Mouse drawing ───────────────────────────────────────────────

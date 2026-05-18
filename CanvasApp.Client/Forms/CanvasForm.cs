@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Web;
+using System.Web.Configuration;
 using System.Windows.Forms;
 using CanvasApp.Client.Controls;
 using CanvasApp.Common;
@@ -15,11 +17,17 @@ namespace CanvasApp.Client
         private Graphics _graphics;
         private bool _isDrawing = false;
         private Common.PointF _lastPoint;
+        private Common.PointF _currentPoint;
         private Color _currentColor = Color.Black;
         private int _thickness = 3;
         private string _currentTool = "pen";
         private DrawAction _currentStroke;
         private Image _bgImage = null;
+        
+        private float _zoom = 1.0f;
+        private System.Drawing.PointF _panOffset = new System.Drawing.PointF(0, 0);
+        private bool _isPanning = false;
+        private System.Drawing.PointF _lastMousePos;
 
         private Room _room;
         private List<RoomMember> _initialMembers; // members lúc join (truyền từ LobbyForm)
@@ -28,15 +36,24 @@ namespace CanvasApp.Client
         {
             InitializeComponent();
 
+            //Chống nhấp nháy màn hình khi vẽ 
+            typeof(Panel).InvokeMember("DoubleBuffered",
+                System.Reflection.BindingFlags.SetProperty |
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic,
+                null, canvasPanel, new object[] { true });
+
             this.Load += (s, e) => InitCanvas();
             canvasPanel.Paint += CanvasPanel_Paint;
             canvasPanel.MouseDown += Canvas_MouseDown;
             canvasPanel.MouseMove += Canvas_MouseMove;
             canvasPanel.MouseUp += Canvas_MouseUp;
+            canvasPanel.MouseWheel += CanvasPanel_MouseWheel;
 
             // Tools
             btnPen.Click += (s, e) => _currentTool = "pen";
             btnEraser.Click += (s, e) => _currentTool = "eraser";
+            
             btnImportBg.Click += (s, e) =>
             {
                 using (OpenFileDialog openFileDialog = new OpenFileDialog())
@@ -76,6 +93,14 @@ namespace CanvasApp.Client
                     }
                 }
             };
+
+            // Shape tools (dev)
+            btnRectangle.Click += (s, e) => _currentTool = "rectangle";
+            btnCircle.Click += (s, e) => _currentTool = "circle";
+            btnLine.Click += (s, e) => _currentTool = "line";
+            btnArrow.Click += (s, e) => _currentTool = "arrow";
+            btnText.Click += (s, e) => _currentTool = "text";
+            
             btnClear.Click += async (s, e) =>
             {
                 if (MessageBox.Show("Xóa toàn bộ canvas?", "Xác nhận",
@@ -149,68 +174,242 @@ namespace CanvasApp.Client
 
         private void CanvasPanel_Paint(object sender, PaintEventArgs e)
         {
+            e.Graphics.TranslateTransform(_panOffset.X, _panOffset.Y);
+            e.Graphics.ScaleTransform(_zoom, _zoom);
+
+            // Draw Background Image (từ nhánh feature/export-image)
             if (_bgImage != null)
             {
                 e.Graphics.DrawImage(_bgImage, 0, 0, _bgImage.Width, _bgImage.Height);
             }
-            if (_bitmap != null)
+
+            if (_bitmap != null) 
             {
                 e.Graphics.DrawImage(_bitmap, 0, 0);
+            }
+
+            // Draw active shape (từ nhánh dev)
+            if (_isDrawing && _currentStroke != null && IsShapeTool(_currentTool))
+            {
+                DrawShape(e.Graphics, _currentStroke.Type, _lastPoint, _currentPoint, _currentStroke.Color, _currentStroke.Thickness);
+            }
+        }
+
+        private void DrawShape(Graphics g, string type, Common.PointF p1, Common.PointF p2, string colorHex, int thickness)
+        {
+            bool isFill = type.EndsWith("_fill");
+            string baseType = type.Replace("_fill", "");
+            Color color = HexToColor(colorHex);
+
+            int x = (int)Math.Min(p1.X, p2.X);
+            int y = (int)Math.Min(p1.Y, p2.Y);
+            int width = (int)Math.Abs(p1.X - p2.X);
+            int height = (int)Math.Abs(p1.Y - p2.Y);
+
+            using (Pen pen = new Pen(color, thickness))
+            using (SolidBrush brush = new SolidBrush(color))
+            {
+                if (baseType == "rectangle")
+                {
+                    if (isFill) g.FillRectangle(brush, x, y, width, height);
+                    else g.DrawRectangle(pen, x, y, width, height);
+                }
+                else if (baseType == "circle") 
+                {
+                    if (isFill) g.FillEllipse(brush, x, y, width, height);
+                    else g.DrawEllipse(pen, x, y, width, height);
+                }
+                else if (baseType == "line")
+                {
+                    g.DrawLine(pen, p1.X, p1.Y, p2.X, p2.Y);
+                }
+                else if (baseType == "arrow")
+                {
+                    pen.CustomEndCap = new AdjustableArrowCap(5, 5); 
+                    g.DrawLine(pen, p1.X, p1.Y, p2.X, p2.Y);
+                }
             }
         }
 
         // ── Mouse drawing ───────────────────────────────────────────────
         private async void Canvas_MouseDown(object sender, MouseEventArgs e)
         {
+            if (e.Button == MouseButtons.Middle)
+            {
+                _isPanning = true;
+                _lastMousePos = e.Location;
+                return;
+            }
+
             if (e.Button != MouseButtons.Left) return;
+
+            if (_currentTool == "text")
+            {
+                TextBox txtInput = new TextBox();
+                txtInput.Location = e.Location;
+                txtInput.Size = new Size(150, 25);
+                txtInput.Font = new Font("Arial", 14);
+                txtInput.ForeColor = _currentColor;
+
+                canvasPanel.Controls.Add(txtInput);
+                txtInput.Focus();
+
+                txtInput.KeyDown += async (s, args) =>
+                {
+                    if (args.KeyCode == Keys.Enter)
+                    {
+                        string textToDraw = txtInput.Text.Trim();
+                        if (!string.IsNullOrEmpty(textToDraw))
+                        {
+                            var textAction = new DrawAction
+                            {
+                                Type = "text:" + textToDraw,
+                                Color = ColorToHex(_currentColor),
+                                Thickness = 14,
+                                Points = new List<Common.PointF> { ScreenToCanvas(e.X, e.Y) }
+                            };
+                            DrawActionLocal(textAction);
+                            canvasPanel.Invalidate();
+                            await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_SHAPE, textAction);
+                        }
+                        canvasPanel.Controls.Remove(txtInput);
+                        txtInput.Dispose();
+                    }
+                };
+                return;
+            }
+
             _isDrawing = true;
-            _lastPoint = new Common.PointF(e.X, e.Y);
+            Common.PointF realPoint = ScreenToCanvas(e.X, e.Y);
+            _lastPoint = realPoint;
+            _currentPoint = realPoint;
+
+            string toolType = IsShapeTool(_currentTool) && chkFill.Checked ? _currentTool + "_fill" : _currentTool;
+
+            int currentThickness = _currentTool == "eraser" ? _thickness * 2 : _thickness;
 
             _currentStroke = new DrawAction
             {
-                Type = _currentTool,
+                Type = toolType,
                 Color = ColorToHex(_currentTool == "eraser" ? Color.White : _currentColor),
-                Thickness = _currentTool == "eraser" ? 20 : _thickness,
+                Thickness = currentThickness,
                 Points = new List<Common.PointF> { _lastPoint }
             };
-
-            await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_START, _currentStroke);
+            if (!IsShapeTool(_currentTool)) 
+            {
+                await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_START, _currentStroke);
+            }
         }
 
         private async void Canvas_MouseMove(object sender, MouseEventArgs e)
         {
+            if (_isPanning)
+            {
+                _panOffset.X += e.X - _lastMousePos.X;
+                _panOffset.Y += e.Y - _lastMousePos.Y;
+                _lastMousePos = e.Location;
+                canvasPanel.Invalidate();
+                return;
+            }
+
             lblCoordinates.Text = $"X: {e.X}, Y: {e.Y}";
             if (!_isDrawing || _currentStroke == null) return;
 
-            var current = new Common.PointF(e.X, e.Y);
-            DrawLineLocal(_lastPoint, current, _currentStroke.Color, _currentStroke.Thickness);
-            _currentStroke.Points.Add(current);
+            var current = ScreenToCanvas(e.X, e.Y);
 
-            await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_MOVE, new DrawAction
+            if (IsShapeTool(_currentTool))
             {
-                Type = _currentTool,
-                Color = _currentStroke.Color,
-                Thickness = _currentStroke.Thickness,
-                Points = new List<Common.PointF> { _lastPoint, current }
-            });
+                canvasPanel.Invalidate();
+            }
+            else
+            {
+                DrawLineLocal(_lastPoint, current, _currentStroke.Color, _currentStroke.Thickness);
+                _currentStroke.Points.Add(current);
 
-            _lastPoint = current;
-            canvasPanel.Invalidate();
+                await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_MOVE, new DrawAction
+                {
+                    Type = _currentTool,
+                    Color = _currentStroke.Color,
+                    Thickness = _currentStroke.Thickness,
+                    Points = new List<Common.PointF> { _lastPoint, current }
+                });
+
+                _lastPoint = current;
+                canvasPanel.Invalidate();
+            }
         }
 
         private async void Canvas_MouseUp(object sender, MouseEventArgs e)
         {
+            if (e.Button == MouseButtons.Middle)
+            {
+                _isPanning = false;
+                return;
+            }
+
             if (!_isDrawing) return;
             _isDrawing = false;
+
             if (_currentStroke != null)
-                await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_END, _currentStroke);
+            {
+                if (IsShapeTool(_currentTool))
+                {
+                    _currentStroke.Points.Add(_currentPoint);
+                    DrawActionLocal(_currentStroke);
+
+                    await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_SHAPE, _currentStroke);
+                }
+                else
+                {
+                    await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_END, _currentStroke);
+                }
+            }
             _currentStroke = null;
+        }
+
+        //Handling scroll events
+        private void CanvasPanel_MouseWheel(object sender, MouseEventArgs e)
+        {
+            float oldZoom = _zoom;
+
+            if (e.Delta > 0) _zoom *= 1.1f;
+            else _zoom /= 1.1f;
+
+            _zoom = Math.Max(0.1f, Math.Min(_zoom, 10f));
+
+            _panOffset.X = e.X - (e.X - _panOffset.X) * (_zoom / oldZoom);
+            _panOffset.Y = e.Y - (e.Y - _panOffset.Y) * (_zoom / oldZoom);
+
+            canvasPanel.Invalidate(); 
+        }
+
+        // Chuyen doi toa do chuot
+        private Common.PointF ScreenToCanvas(int x, int y)
+        {
+            return new Common.PointF((x - _panOffset.X) / _zoom, (y - _panOffset.Y) / _zoom);
         }
 
         // ── Apply remote draw action ────────────────────────────────────
         private void DrawActionLocal(DrawAction action)
         {
+            if (action.Type.Contains("rectangle") || action.Type.Contains("circle") || action.Type.Contains("line") || action.Type.Contains("arrow"))
+            {
+                DrawShape(_graphics, action.Type, action.Points[0], action.Points[1], action.Color, action.Thickness);
+                return;
+            }
             if (_graphics == null || action.Points == null || action.Points.Count < 2) return;
+
+            if (action.Type.StartsWith("text:"))
+            {
+                string textContent = action.Type.Substring(5); 
+                using (Font font = new Font("Arial", action.Thickness))
+                using (SolidBrush brush = new SolidBrush(HexToColor(action.Color)))
+                {
+                    _graphics.DrawString(textContent, font, brush, action.Points[0].X, action.Points[0].Y);
+                }
+                return;
+            }
+
             for (int i = 1; i < action.Points.Count; i++)
                 DrawLineLocal(action.Points[i - 1], action.Points[i], action.Color, action.Thickness);
         }
@@ -369,6 +568,20 @@ namespace CanvasApp.Client
         {
             CanvasClient.Instance.OnMessageReceived -= OnServerMessage;
             base.OnFormClosed(e);
+        }
+
+        //Shape 
+        private bool IsShapeTool(string tool)
+        {
+            return tool == "rectangle" || tool == "circle" || tool == "line" || tool == "arrow";
+        }
+        //brush-size
+        private void tscbSize_TextChanged(object sender, EventArgs e)
+        {
+            if (int.TryParse(tscbSize.Text, out int newSize))
+            {
+                _thickness = newSize;
+            }
         }
     }
 }

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Linq;
 using System.Windows.Forms;
 using CanvasApp.Client.Controls;
 using CanvasApp.Common;
@@ -12,6 +13,8 @@ namespace CanvasApp.Client
     {
         // ── Drawing state ───────────────────────────────────────────────
         private Bitmap _bitmap;
+        private Stack<DrawAction> _undoStack = new Stack<DrawAction>();
+        private Stack<DrawAction> _redoStack = new Stack<DrawAction>();
         private Graphics _graphics;
         private bool _isDrawing = false;
         private Common.PointF _lastPoint;
@@ -28,6 +31,8 @@ namespace CanvasApp.Client
             InitializeComponent();
 
             this.Load += (s, e) => InitCanvas();
+            this.KeyPreview = true;
+            this.KeyDown += CanvasForm_KeyDown;
             canvasPanel.Paint += CanvasPanel_Paint;
             canvasPanel.MouseDown += Canvas_MouseDown;
             canvasPanel.MouseMove += Canvas_MouseMove;
@@ -36,6 +41,22 @@ namespace CanvasApp.Client
             // Tools
             btnPen.Click += (s, e) => _currentTool = "pen";
             btnEraser.Click += (s, e) => _currentTool = "eraser";
+            btnUndo.Click += (s, e) =>
+            {
+                if (_undoStack.Count > 0)
+                {
+                    _redoStack.Push(_undoStack.Pop());
+                    RedrawCanvas();
+                }
+            };
+            btnRedo.Click += (s, e) =>
+            {
+                if (_redoStack.Count > 0)
+                {
+                    _undoStack.Push(_redoStack.Pop());
+                    RedrawCanvas();
+                }
+            };
             btnClear.Click += async (s, e) =>
             {
                 if (MessageBox.Show("Xóa toàn bộ canvas?", "Xác nhận",
@@ -158,6 +179,11 @@ namespace CanvasApp.Client
             if (_currentStroke != null)
                 await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_END, _currentStroke);
             _currentStroke = null;
+            if (_currentStroke != null && _currentStroke.Points.Count > 0)
+            {
+                _undoStack.Push(_currentStroke);
+                _redoStack.Clear();
+            }
         }
 
         // ── Apply remote draw action ────────────────────────────────────
@@ -322,6 +348,31 @@ namespace CanvasApp.Client
         {
             CanvasClient.Instance.OnMessageReceived -= OnServerMessage;
             base.OnFormClosed(e);
+        }
+
+        // Undo - redo
+        private void RedrawCanvas()
+        {
+            _graphics.Clear(Color.White);
+            foreach (var action in _undoStack.Reverse())
+            {
+                DrawActionLocal(action);
+            }
+            canvasPanel.Invalidate();
+        }
+
+        private void CanvasForm_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Control && e.KeyCode == Keys.Z)
+            {
+                btnUndo.PerformClick();
+                e.SuppressKeyPress = true;
+            }
+            else if (e.Control && e.KeyCode == Keys.Y)
+            {
+                btnRedo.PerformClick();
+                e.SuppressKeyPress = true;
+            }
         }
     }
 }

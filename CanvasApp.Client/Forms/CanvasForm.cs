@@ -17,7 +17,8 @@ namespace CanvasApp.Client
         private bool _isDrawing = false;
         private Common.PointF _lastPoint;
         private Color _currentColor = Color.Black;
-        private int _thickness = 3;
+        private int _penThickness = 3;
+        private int _eraserThickness = 20;
         private string _currentTool = "pen";
         private DrawAction _currentStroke;
 
@@ -42,8 +43,16 @@ namespace CanvasApp.Client
             canvasPanel.MouseUp += Canvas_MouseUp;
 
             // Tools
-            btnPen.Click += (s, e) => _currentTool = "pen";
-            btnEraser.Click += (s, e) => _currentTool = "eraser";
+            btnPen.Click += (s, e) =>
+            {
+                _currentTool = "pen";
+                tscbSize.Text = _penThickness.ToString();
+            };
+            btnEraser.Click += (s, e) =>
+            {
+                _currentTool = "eraser";
+                tscbSize.Text = _eraserThickness.ToString();
+            };
             btnClear.Click += async (s, e) =>
             {
                 if (MessageBox.Show("Xóa toàn bộ canvas?", "Xác nhận",
@@ -127,13 +136,13 @@ namespace CanvasApp.Client
             _isDrawing = true;
             _lastPoint = new Common.PointF(e.X, e.Y);
 
-            int currentThickness = _currentTool == "eraser" ? _thickness * 2 : _thickness;
+            bool isEraser = _currentTool == "eraser";
 
             _currentStroke = new DrawAction
             {
                 Type = _currentTool,
-                Color = ColorToHex(_currentTool == "earaser" ? Color.White : _currentColor),
-                Thickness = currentThickness,
+                Color = isEraser ? ColorToHex(Color.White) : ColorToHex(_currentColor),
+                Thickness = isEraser ? _eraserThickness : _penThickness,
                 Points = new List<Common.PointF> {  _lastPoint}
             };
 
@@ -174,6 +183,10 @@ namespace CanvasApp.Client
         private void DrawActionLocal(DrawAction action)
         {
             if (_graphics == null || action.Points == null || action.Points.Count < 2) return;
+            if (action.Type == "eraser")
+            {
+                action.Color = ColorToHex(Color.White);
+            }
             for (int i = 1; i < action.Points.Count; i++)
                 DrawLineLocal(action.Points[i - 1], action.Points[i], action.Color, action.Thickness);
         }
@@ -339,7 +352,14 @@ namespace CanvasApp.Client
         {
             if (int.TryParse(tscbSize.Text, out int newSize))
             {
-                _thickness = newSize;
+                if (_currentTool == "eraser")
+                {
+                    _eraserThickness = newSize;
+                }
+                else
+                {
+                    _penThickness = newSize;
+                }
             }
         }
     }

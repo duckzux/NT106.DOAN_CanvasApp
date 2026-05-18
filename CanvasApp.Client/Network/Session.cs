@@ -19,9 +19,9 @@ namespace CanvasApp.Client
         }
 
         // Cấu hình server (đổi IP/port khi deploy)
-        public const string AUTH_HOST = "10.232.200.197";
+        public const string AUTH_HOST = "127.0.0.1";
         public const int AUTH_PORT = 9001;
-        public const string CANVAS_HOST = "10.232.200.197";
+        public const string CANVAS_HOST = "127.0.0.1";
         public const int CANVAS_PORT = 9002;
     }
 }

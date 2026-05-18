@@ -22,6 +22,8 @@ namespace CanvasApp.Client
         private int _thickness = 3;
         private string _currentTool = "pen";
         private DrawAction _currentStroke;
+        private Image _bgImage = null;
+        
         private float _zoom = 1.0f;
         private System.Drawing.PointF _panOffset = new System.Drawing.PointF(0, 0);
         private bool _isPanning = false;
@@ -51,11 +53,54 @@ namespace CanvasApp.Client
             // Tools
             btnPen.Click += (s, e) => _currentTool = "pen";
             btnEraser.Click += (s, e) => _currentTool = "eraser";
+            
+            btnImportBg.Click += (s, e) =>
+            {
+                using (OpenFileDialog openFileDialog = new OpenFileDialog())
+                {
+                    openFileDialog.Filter = "Image Files(*.BMP;*.JPG;*.JPEG;*.PNG)|*.BMP;*.JPG;*.JPEG;*.PNG";
+                    openFileDialog.Title = "Chọn ảnh nền cho Canvas";
+
+                    if (openFileDialog.ShowDialog() == DialogResult.OK)
+                    {
+                        _bgImage = Image.FromFile(openFileDialog.FileName);
+                        canvasPanel.Invalidate();
+                    }
+                }
+            };
+            btnExport.Click += (s, e) =>
+            {
+                using (SaveFileDialog saveFileDialog = new SaveFileDialog())
+                {
+                    saveFileDialog.Filter = "PNG Image|*.png|JPEG Image|*.jpg";
+                    saveFileDialog.Title = "Xuất bản vẽ ra file ảnh";
+                    saveFileDialog.FileName = "my_canvas_export"; 
+
+                    if (saveFileDialog.ShowDialog() == DialogResult.OK)
+                    {
+                        Bitmap bmp = new Bitmap(canvasPanel.Width, canvasPanel.Height);
+                        canvasPanel.DrawToBitmap(bmp, new Rectangle(0, 0, canvasPanel.Width, canvasPanel.Height));
+                        System.Drawing.Imaging.ImageFormat format = System.Drawing.Imaging.ImageFormat.Png;
+
+                        if (saveFileDialog.FilterIndex == 2)
+                        {
+                            format = System.Drawing.Imaging.ImageFormat.Jpeg;
+                        }
+                        bmp.Save(saveFileDialog.FileName, format);
+                        bmp.Dispose();
+
+                        MessageBox.Show("Đã xuất ảnh thành công rùi nha Nguyên ơi! 🎉", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                }
+            };
+
+            // Shape tools (dev)
             btnRectangle.Click += (s, e) => _currentTool = "rectangle";
             btnCircle.Click += (s, e) => _currentTool = "circle";
             btnLine.Click += (s, e) => _currentTool = "line";
             btnArrow.Click += (s, e) => _currentTool = "arrow";
             btnText.Click += (s, e) => _currentTool = "text";
+            
             btnClear.Click += async (s, e) =>
             {
                 if (MessageBox.Show("Xóa toàn bộ canvas?", "Xác nhận",
@@ -90,21 +135,39 @@ namespace CanvasApp.Client
             CanvasClient.Instance.OnMessageReceived += OnServerMessage;
         }
 
-        public void SetRoom(Room room, List<DrawAction> initialState, List<RoomMember> initialMembers = null)
+        public void SetRoom(JoinRoomResult joinRes)
         {
-            _room = room;
-            _initialMembers = initialMembers ?? new List<RoomMember>();
+            _room = joinRes.Room;
+            _initialMembers = joinRes.Members ?? new List<RoomMember>();
             this.Load += (s, e) =>
             {
-                lblRoomName.Text = room.Name;
-                lblRoomCode.Text = $"Mã: {room.Id}";
-                foreach (var action in initialState)
-                    DrawActionLocal(action);
-                canvasPanel.Invalidate();
+                lblRoomName.Text = joinRes.Room.Name;
+                // Show the invite code so users can share it
+                var code = joinRes.Room.InviteCode ?? joinRes.Room.Id;
+                lblRoomCode.Text = $"Mã mời: {code}";
 
-                // Populate user list lúc join
+                // Apply compressed snapshot baseline first (if available),
+                // then apply the delta actions on top.
+                if (!string.IsNullOrEmpty(joinRes.SnapshotData))
+                {
+                    try
+                    {
+                        var baseline = SnapshotHelper.Decompress(joinRes.SnapshotData);
+                        foreach (var action in baseline)
+                            DrawActionLocal(action);
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendSystemMessage($"[Cảnh báo] Không thể tải snapshot: {ex.Message}");
+                    }
+                }
+
+                foreach (var action in joinRes.CanvasState)
+                    DrawActionLocal(action);
+
+                canvasPanel.Invalidate();
                 RenderUserList(_initialMembers);
-                AppendSystemMessage($"Bạn đã vào phòng '{room.Name}'.");
+                AppendSystemMessage($"Bạn đã vào phòng '{joinRes.Room.Name}'.");
             };
         }
 
@@ -113,7 +176,7 @@ namespace CanvasApp.Client
         {
             _bitmap = new Bitmap(Math.Max(canvasPanel.Width, 100), Math.Max(canvasPanel.Height, 100));
             _graphics = Graphics.FromImage(_bitmap);
-            _graphics.Clear(Color.White);
+            _graphics.Clear(Color.Transparent);
             _graphics.SmoothingMode = SmoothingMode.AntiAlias;
             canvasPanel.Invalidate();
         }
@@ -132,8 +195,18 @@ namespace CanvasApp.Client
             e.Graphics.TranslateTransform(_panOffset.X, _panOffset.Y);
             e.Graphics.ScaleTransform(_zoom, _zoom);
 
-            if (_bitmap != null) e.Graphics.DrawImage(_bitmap, 0, 0);
+            // Draw Background Image (từ nhánh feature/export-image)
+            if (_bgImage != null)
+            {
+                e.Graphics.DrawImage(_bgImage, 0, 0, _bgImage.Width, _bgImage.Height);
+            }
 
+            if (_bitmap != null) 
+            {
+                e.Graphics.DrawImage(_bitmap, 0, 0);
+            }
+
+            // Draw active shape (từ nhánh dev)
             if (_isDrawing && _currentStroke != null && IsShapeTool(_currentTool))
             {
                 DrawShape(e.Graphics, _currentStroke.Type, _lastPoint, _currentPoint, _currentStroke.Color, _currentStroke.Thickness);
@@ -390,6 +463,13 @@ namespace CanvasApp.Client
                     case MessageType.CHAT_MESSAGE:
                         var chat = msg.GetData<ChatMessage>();
                         AppendChatMessage(chat.Username, chat.Text);
+                        break;
+
+                    case MessageType.CHAT_HISTORY:
+                        var hist = msg.GetData<ChatHistoryResult>();
+                        if (hist?.Messages != null)
+                            foreach (var m in hist.Messages)
+                                AppendChatMessage(m.Username, m.Text);
                         break;
 
                     case MessageType.ROOM_UPDATE:

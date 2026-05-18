@@ -67,12 +67,8 @@ namespace CanvasApp.Common
         // Canvas state sync
         public const string CANVAS_STATE = "CANVAS_STATE";
 
-        // Room - invite code
-        public const string ROOM_JOIN_BY_CODE = "ROOM_JOIN_BY_CODE";
-
         // Chat
         public const string CHAT_MESSAGE = "CHAT_MESSAGE";
-        public const string CHAT_HISTORY = "CHAT_HISTORY";
 
         // Generic
         public const string ERROR = "ERROR";

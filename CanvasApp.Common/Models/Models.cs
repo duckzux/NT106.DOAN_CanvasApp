@@ -24,7 +24,6 @@ namespace CanvasApp.Common
         [JsonProperty("maxUsers")] public int MaxUsers { get; set; } = 4;
         [JsonProperty("currentUsers")] public int CurrentUsers { get; set; }
         [JsonProperty("createdAt")] public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-        [JsonProperty("inviteCode")] public string InviteCode { get; set; }
 
         [JsonIgnore] public string PasswordHash { get; set; }
     }
@@ -93,24 +92,9 @@ namespace CanvasApp.Common
     {
         public bool Success { get; set; }
         public string Message { get; set; }
-        public bool RequiresPassword { get; set; }
         public Room Room { get; set; }
-        // Compressed baseline snapshot (base64 GZip). Null when no snapshot exists yet.
-        // Client should decompress this first, then apply CanvasState deltas on top.
-        public string SnapshotData { get; set; }
         public List<DrawAction> CanvasState { get; set; } = new List<DrawAction>();
         public List<RoomMember> Members { get; set; } = new List<RoomMember>();
-    }
-
-    public class InviteCodeRequest
-    {
-        public string InviteCode { get; set; }
-        public string Password { get; set; }
-    }
-
-    public class ChatHistoryResult
-    {
-        public List<ChatMessage> Messages { get; set; } = new List<ChatMessage>();
     }
 
     public class RoomListResult
@@ -129,23 +113,6 @@ namespace CanvasApp.Common
         [JsonProperty("text")] public string Text { get; set; }
         [JsonProperty("filled")] public bool Filled { get; set; }
         [JsonProperty("timestamp")] public long Timestamp { get; set; }
-
-        // DB-only metadata — not sent to clients
-        [JsonIgnore] public string RoomId { get; set; }
-        [JsonIgnore] public long SeqNo { get; set; }
-        [JsonIgnore] public bool IsUndone { get; set; }
-    }
-
-    // ── Canvas snapshot ──────────────────────────────────────────────
-    public class CanvasSnapshot
-    {
-        public long Id { get; set; }
-        public string RoomId { get; set; }
-        public int Version { get; set; }
-        public string SnapshotData { get; set; }   // compressed+base64 JSON of committed actions
-        public long ActionSeqAt { get; set; }       // last draw_action seq_no included in this snapshot
-        public int ByteSize { get; set; }
-        public DateTime CreatedAt { get; set; }
     }
 
     public class PointF

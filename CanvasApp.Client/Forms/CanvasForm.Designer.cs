@@ -81,7 +81,6 @@ namespace CanvasApp.Client
             this.toolStrip1 = new System.Windows.Forms.ToolStrip();
             this.tscbSize = new System.Windows.Forms.ToolStripComboBox();
             this.colorDialog1 = new System.Windows.Forms.ColorDialog();
-            this.btnImportBg = new System.Windows.Forms.ToolStripButton();
             this.pnlHeader.SuspendLayout();
             this.pnlRight.SuspendLayout();
             this.canvasPanel.SuspendLayout();
@@ -617,12 +616,11 @@ namespace CanvasApp.Client
             this.btnArrow,
             this.btnText,
             this.btnColor,
-            this.chkFill,
             this.btnUndo,
             this.btnRedo,
             this.btnClear,
-            this.btnImportBg,
-            this.btnExport});
+            this.btnExport,
+            this.chkFill});
             this.toolStrip1.Location = new System.Drawing.Point(0, 45);
             this.toolStrip1.Margin = new System.Windows.Forms.Padding(0, 5, 0, 5);
             this.toolStrip1.Name = "toolStrip1";
@@ -660,15 +658,6 @@ namespace CanvasApp.Client
             // 
             this.colorDialog1.AnyColor = true;
             this.colorDialog1.FullOpen = true;
-            // 
-            // btnImportBg
-            // 
-            this.btnImportBg.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
-            this.btnImportBg.Image = ((System.Drawing.Image)(resources.GetObject("btnImportBg.Image")));
-            this.btnImportBg.ImageTransparentColor = System.Drawing.Color.Magenta;
-            this.btnImportBg.Name = "btnImportBg";
-            this.btnImportBg.Size = new System.Drawing.Size(43, 28);
-            this.btnImportBg.Text = "toolStripButton1";
             // 
             // CanvasForm
             // 
@@ -752,7 +741,6 @@ namespace CanvasApp.Client
         private System.Windows.Forms.Panel pnlColorBlack;
         private System.Windows.Forms.FlowLayoutPanel flpRecentColors;
         private System.Windows.Forms.ColorDialog colorDialog1;
-        private ToolStripButton btnImportBg;
         private ToolStripComboBox tscbSize;
     }
 }

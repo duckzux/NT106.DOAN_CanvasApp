@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Web;
+using System.Web.Configuration;
 using System.Windows.Forms;
 using CanvasApp.Client.Controls;
 using CanvasApp.Common;
@@ -32,6 +33,13 @@ namespace CanvasApp.Client
         public CanvasForm()
         {
             InitializeComponent();
+
+            //Chống nhấp nháy màn hình khi vẽ 
+            typeof(Panel).InvokeMember("DoubleBuffered",
+                System.Reflection.BindingFlags.SetProperty |
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic,
+                null, canvasPanel, new object[] { true });
 
             this.Load += (s, e) => InitCanvas();
             canvasPanel.Paint += CanvasPanel_Paint;
@@ -223,11 +231,13 @@ namespace CanvasApp.Client
 
             string toolType = IsShapeTool(_currentTool) && chkFill.Checked ? _currentTool + "_fill" : _currentTool;
 
+            int currentThickness = _currentTool == "eraser" ? _thickness * 2 : _thickness;
+
             _currentStroke = new DrawAction
             {
                 Type = toolType,
                 Color = ColorToHex(_currentTool == "eraser" ? Color.White : _currentColor),
-                Thickness = _currentTool == "eraser" ? 20 : _thickness,
+                Thickness = currentThickness,
                 Points = new List<Common.PointF> { _lastPoint }
             };
             if (!IsShapeTool(_currentTool)) 
@@ -509,6 +519,14 @@ namespace CanvasApp.Client
         private bool IsShapeTool(string tool)
         {
             return tool == "rectangle" || tool == "circle" || tool == "line" || tool == "arrow";
+        }
+        //brush-size
+        private void tscbSize_TextChanged(object sender, EventArgs e)
+        {
+            if (int.TryParse(tscbSize.Text, out int newSize))
+            {
+                _thickness = newSize;
+            }
         }
     }
 }

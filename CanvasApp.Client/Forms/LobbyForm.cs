@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using CanvasApp.Common;
 using CanvasMessage = CanvasApp.Common.Message;
@@ -10,28 +11,77 @@ namespace CanvasApp.Client
     {
         private CreateRoom createRoom;
         private RequirePassword requirePassword;
-        private RoomCard _pendingJoinCard; // RoomCard đang chờ kết quả join từ server
+        private RoomCard _pendingJoinCard;
+        // Stores the invite code used for the pending join so we can retry with password
+        private string _pendingInviteCode;
 
         public LobbyForm()
         {
             InitializeComponent();
             btnLogout.Click += btnLogout_Click;
 
-            // Đăng ký nhận message từ server
             CanvasClient.Instance.OnMessageReceived += OnServerMessage;
             CanvasClient.Instance.OnDisconnected += OnDisconnected;
 
             this.Load += async (s, e) =>
             {
                 lblTitle.Text = $"Xin chào, {Session.CurrentUser?.Username}";
+                AddJoinByCodeButton();
                 await CanvasClient.Instance.RequestRoomListAsync();
             };
+        }
+
+        // Adds a "Nhập mã mời" button programmatically next to btnCreateShow.
+        private void AddJoinByCodeButton()
+        {
+            var btn = new Guna.UI2.WinForms.Guna2Button
+            {
+                Text = "Nhập mã mời",
+                Size = new Size(140, btnCreateShow.Height),
+                Location = new Point(btnCreateShow.Right + 10, btnCreateShow.Top),
+                BorderRadius = btnCreateShow.BorderRadius,
+                FillColor = System.Drawing.Color.FromArgb(52, 152, 219),
+                ForeColor = System.Drawing.Color.White,
+                Font = btnCreateShow.Font
+            };
+            btn.Click += async (s, e) => await PromptJoinByCode();
+            btnCreateShow.Parent.Controls.Add(btn);
+        }
+
+        private async Task PromptJoinByCode()
+        {
+            using (var dlg = new Form
+            {
+                Text = "Tham gia bằng mã mời",
+                Size = new Size(340, 200),
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MaximizeBox = false,
+                MinimizeBox = false
+            })
+            {
+                var lblCode = new Label { Text = "Mã mời:", Location = new Point(20, 20), AutoSize = true };
+                var txtCode = new TextBox { Location = new Point(100, 17), Size = new Size(200, 25), CharacterCasing = CharacterCasing.Upper };
+                var lblPwd  = new Label { Text = "Mật khẩu:", Location = new Point(20, 58), AutoSize = true };
+                var txtPwd  = new TextBox { Location = new Point(100, 55), Size = new Size(200, 25), PasswordChar = '●' };
+                var lblHint = new Label { Text = "(bỏ trống nếu phòng không có mật khẩu)", Location = new Point(100, 80), AutoSize = true, ForeColor = System.Drawing.Color.Gray, Font = new Font(Font.FontFamily, 7f) };
+                var btnJoin = new Button { Text = "Tham gia", Location = new Point(100, 110), Size = new Size(100, 32), DialogResult = DialogResult.OK };
+                var btnCancel = new Button { Text = "Hủy", Location = new Point(210, 110), Size = new Size(90, 32), DialogResult = DialogResult.Cancel };
+                dlg.Controls.AddRange(new Control[] { lblCode, txtCode, lblPwd, txtPwd, lblHint, btnJoin, btnCancel });
+                dlg.AcceptButton = btnJoin;
+                dlg.CancelButton = btnCancel;
+
+                if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrWhiteSpace(txtCode.Text))
+                {
+                    _pendingInviteCode = txtCode.Text.Trim().ToUpper();
+                    await CanvasClient.Instance.JoinRoomByCodeAsync(_pendingInviteCode, txtPwd.Text);
+                }
+            }
         }
 
         // ── Server message handler ──────────────────────────────────────
         private void OnServerMessage(CanvasMessage msg)
         {
-            // Tất cả update UI phải Invoke về UI thread
             if (this.IsDisposed) return;
 
             this.BeginInvoke((Action)(() =>
@@ -44,6 +94,7 @@ namespace CanvasApp.Client
                         break;
 
                     case MessageType.ROOM_CREATE_RESULT:
+                        // The creator gets this; others get ROOM_LIST_RESULT pushed from server
                         var newRoom = msg.GetData<Room>();
                         AddRoomCard(newRoom);
                         if (createRoom != null) createRoom.Visible = false;
@@ -54,9 +105,8 @@ namespace CanvasApp.Client
                         HandleJoinResult(joinRes);
                         break;
 
-                    case MessageType.ROOM_UPDATE:
-                        // Refresh để cập nhật currentUsers
-                        _ = CanvasClient.Instance.RequestRoomListAsync();
+                    case MessageType.CHAT_HISTORY:
+                        // Chat history is only relevant inside CanvasForm; ignore here.
                         break;
                 }
             }));
@@ -116,14 +166,24 @@ namespace CanvasApp.Client
         {
             if (!res.Success)
             {
+                // Server says the room requires a password that wasn't supplied
+                // (happens when joining by invite code without entering a password)
+                if (res.RequiresPassword && !string.IsNullOrEmpty(_pendingInviteCode))
+                {
+                    ShowRequirePasswordForCode(_pendingInviteCode);
+                    return;
+                }
+
                 MessageBox.Show(res.Message, "Không vào được phòng",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                _pendingInviteCode = null;
                 return;
             }
 
-            // Mở CanvasForm với roomId + danh sách members hiện tại
+            _pendingInviteCode = null;
+
             var canvas = new CanvasForm();
-            canvas.SetRoom(res.Room, res.CanvasState, res.Members);
+            canvas.SetRoom(res);
             canvas.Show();
             this.Hide();
 
@@ -131,6 +191,35 @@ namespace CanvasApp.Client
             {
                 this.Show();
                 _ = CanvasClient.Instance.RequestRoomListAsync();
+            };
+        }
+
+        // Shows a password dialog then retries the invite-code join with the password.
+        private void ShowRequirePasswordForCode(string inviteCode)
+        {
+            if (requirePassword == null || requirePassword.IsDisposed)
+            {
+                requirePassword = new RequirePassword();
+                requirePassword.Size = new Size(466, 239);
+                requirePassword.Location = new Point(
+                    (this.ClientSize.Width  - requirePassword.Width)  / 2,
+                    (this.ClientSize.Height - requirePassword.Height) / 2);
+                this.Controls.Add(requirePassword);
+            }
+
+            requirePassword.Visible = true;
+            requirePassword.BringToFront();
+
+            requirePassword.OnSubmit = async (inputPass) =>
+            {
+                requirePassword.Visible = false;
+                _pendingInviteCode = inviteCode;
+                await CanvasClient.Instance.JoinRoomByCodeAsync(inviteCode, inputPass);
+            };
+            requirePassword.OnCancel = () =>
+            {
+                requirePassword.Visible = false;
+                _pendingInviteCode = null;
             };
         }
 

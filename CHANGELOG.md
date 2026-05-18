@@ -1,4 +1,161 @@
 
+# [2026-05-18] Bug Fixes & Feature Additions — Room Sync, Invite Codes, Chat Persistence, Architecture Hardening
+
+## CanvasApp.Common — Models & Protocol
+
+| File | Thay đổi |
+|------|----------|
+| `Models/Message.cs` | Thêm hằng `ROOM_JOIN_BY_CODE`, `CHAT_HISTORY` vào `MessageType` |
+| `Models/Models.cs` | Thêm `Room.InviteCode` (`[JsonProperty("inviteCode")]`); thêm `JoinRoomResult.SnapshotData` (compressed baseline), `JoinRoomResult.RequiresPassword`; thêm class mới `InviteCodeRequest`, `ChatHistoryResult` |
+
+## CanvasApp.Common — DataAccess & Utils
+
+| File | Thay đổi |
+|------|----------|
+| `DataAccess/ChatMessageDAO.cs` | **File mới** — `Insert(roomId, userId, message)` lưu vào `chat_messages`; `GetByRoom(roomId, limit=50)` trả về lịch sử chat có join với `users` để lấy `username`, kết quả theo thứ tự tăng dần thời gian |
+| `DataAccess/RoomDAO.cs` | Thêm cột `invite_code` vào `Insert()`, `FindById()`, `GetAllActive()` và `MapRow()`; schema SQL cập nhật phản ánh column mới |
+| `Utils/SnapshotHelper.cs` | **File mới** — `static Compress(json)` (GZip + Base64) và `static Decompress(base64)` → `List<DrawAction>`; dùng chung bởi cả server lẫn client để tránh duplicate code và tránh circular dependency |
+| `CanvasApp.Common.csproj` | Thêm `<Compile>` entry cho `ChatMessageDAO.cs` và `SnapshotHelper.cs` |
+
+## CanvasApp.AuthServer
+
+| File | Thay đổi |
+|------|----------|
+| `UserStore.cs` | **Fix bảo mật**: `VerifyToken()` bây giờ parse `issuedAt` từ token và từ chối nếu `now − issuedAt > 86400s` (24h TTL) — trước đây token không bao giờ hết hạn. Thêm `CREATE TABLE chat_messages` vào `InitializeDatabase()`. Thêm migration `ALTER TABLE rooms ADD COLUMN invite_code VARCHAR(8) NULL` vào `MigrateSchema()` |
+
+## CanvasApp.Server — RoomManager (kiến trúc thay đổi lớn)
+
+| Tính năng | Mô tả |
+|-----------|-------|
+| **All-client tracking** | `_allClients: ConcurrentDictionary<ConnectedClient, byte>` — track tất cả TCP client đang kết nối; `RegisterClient()` / `UnregisterClient()` gọi từ `HandleClient` |
+| **Lobby broadcast** | `BroadcastToLobbyAsync(msg, except)` — gửi đến tất cả client có `CurrentRoomId == null` (đang ở lobby); dùng để đồng bộ danh sách phòng theo thời gian thực |
+| **Invite code** | `_codeToRoomId: ConcurrentDictionary<string,string>`; `GenerateInviteCode()` sinh mã 6 ký tự (A-Z, 2-9, loại bỏ ký tự dễ nhầm); `GetRoomByInviteCode(code)`; code được lưu DB và load lại khi server restart |
+| **Snapshot cache** | `_snapshotCache: ConcurrentDictionary<string,string>` lưu compressed snapshot mới nhất cho từng room; `SetSnapshotCache()` được gọi sau khi AutoSaveService persist DB xong |
+| **Canvas trim** | `TrimCanvasState(roomId, upToSeq)` — xóa khỏi `_canvasState` tất cả action có `SeqNo ≤ upToSeq` sau mỗi snapshot; `_canvasState` chỉ giữ delta kể từ snapshot gần nhất thay vì toàn bộ lịch sử |
+| **PrepareSnapshot mới** | Decompress `_snapshotCache` ngoài lock + append `_canvasState` delta bên trong lock → trả về full state cho AutoSaveService nén lại; tránh circular dependency qua `SnapshotHelper` |
+| **EnsureCanvasLoaded mới** | Không còn add snapshot actions vào `_canvasState`; chỉ cache compressed data vào `_snapshotCache`, chỉ thêm delta vào `_canvasState` |
+| **Join mới** | Trả về `JoinRoomResult.SnapshotData` (compressed) + `CanvasState` (delta only); khi room join lần đầu xóa `_lastEmptyTime` |
+| **Idle room tracking** | `_lastEmptyTime` ghi timestamp khi room về 0 client; `GetIdleRoomIds(threshold)` + `RemoveIdleRoom(roomId)` dọn sạch RAM và soft-delete DB |
+| **Leave** | Sau khi remove client, nếu room rỗng ghi `_lastEmptyTime[roomId] = UtcNow` |
+| **ClearCanvas** | Cũng xóa `_snapshotCache[roomId]` để client join sau khi clear nhận canvas rỗng |
+
+## CanvasApp.Server — AutoSaveService
+
+| Thay đổi | Mô tả |
+|----------|-------|
+| **Fix GC race condition** | `DeleteOlderThanSeq(roomId, oldestSeq - GcSafetyMargin)` (margin = 200, khớp với batch size của `PersistenceQueue`); trước đây GC có thể xóa action chưa kịp flush xuống DB |
+| **Snapshot cache + trim** | Sau khi persist snapshot xong gọi `_rooms.SetSnapshotCache()` rồi `_rooms.TrimCanvasState()`; giữ RAM bounded |
+| **Idle room cleanup** | `CheckIdleRooms()` gọi mỗi 60s trong `Tick()`; room rỗng > 30 phút → `RemoveIdleRoom()` |
+| **SnapshotHelper delegation** | `Compress`/`Decompress` ủy quyền cho `SnapshotHelper`; `AutoSaveService.Decompress()` giữ lại cho backward compat |
+
+## CanvasApp.Server — Program.cs
+
+| Thay đổi | Mô tả |
+|----------|-------|
+| **Client lifecycle** | `RegisterClient()` khi connect, `UnregisterClient()` trong finally block |
+| **Input validation** | Từ chối payload > 64 KB trước khi parse JSON; tên phòng phải 1–100 ký tự; màu vẽ phải khớp regex `#RGB` hoặc `#RRGGBB` (auto-correct về `#000000`); chat text giới hạn 1000 ký tự |
+| **ROOM_JOIN_BY_CODE** | Handler mới: lookup room bằng invite code → gọi `HandleJoin()` chung với `ROOM_JOIN` |
+| **Shared HandleJoin()** | Private method dùng cho cả `ROOM_JOIN` và `ROOM_JOIN_BY_CODE`; gửi `CHAT_HISTORY` (50 tin gần nhất) ngay sau join thành công; broadcast `ROOM_UPDATE` cho client trong phòng; push `ROOM_LIST_RESULT` đến lobby |
+| **Lobby sync** | Sau `ROOM_CREATE`, `ROOM_JOIN`, `ROOM_LEAVE`, `HandleClient.finally` đều push `ROOM_LIST_RESULT` đến tất cả lobby client |
+| **Chat persistence** | Khởi tạo `ChatMessageDAO`; trong `CHAT_MESSAGE` handler gọi `_chatDao.Insert()` fire-and-forget |
+| **Token error message** | Thông báo lỗi rõ hơn: `"Token không hợp lệ hoặc đã hết hạn"` |
+
+## CanvasApp.Client
+
+| File | Thay đổi |
+|------|----------|
+| `Network/CanvasClient.cs` | Thêm `JoinRoomByCodeAsync(inviteCode, password)` — gửi `ROOM_JOIN_BY_CODE` |
+| `Forms/LobbyForm.cs` | Thêm `using System.Threading.Tasks`; thêm button "Nhập mã mời" programmatically bên cạnh `btnCreateShow`; `PromptJoinByCode()` hiển thị dialog nhập code + password tùy chọn; `HandleJoinResult()` xử lý `RequiresPassword = true` bằng cách hiện `RequirePassword` dialog và retry; bỏ handler `ROOM_UPDATE` (server giờ push `ROOM_LIST_RESULT` trực tiếp); thêm case `CHAT_HISTORY` (ignore trong lobby) |
+| `Forms/CanvasForm.cs` | `SetRoom(JoinRoomResult)` thay thế `SetRoom(Room, List<DrawAction>, List<RoomMember>)`; decompresses `SnapshotData` qua `SnapshotHelper.Decompress()` rồi apply baseline trước, sau đó apply delta; `lblRoomCode` hiển thị `InviteCode`; thêm handler `CHAT_HISTORY` để populate chat log khi join |
+
+## Database
+
+| File | Thay đổi |
+|------|----------|
+| `Database/schema.sql` | Thêm column `invite_code VARCHAR(8) NULL` + `UNIQUE KEY uk_invite_code` vào bảng `rooms`; thêm bảng mới `chat_messages (id, room_id, user_id, message TEXT, sent_at)` với index `idx_chat_room (room_id, id)` |
+
+## Bug Fixes
+
+| Bug | Fix |
+|-----|-----|
+| Danh sách phòng không sync giữa các user sau login | Server push `ROOM_LIST_RESULT` đến tất cả lobby client sau mỗi sự kiện tạo/join/rời phòng |
+| Lịch sử chat mất khi restart server hoặc join muộn | `ChatMessageDAO.Insert()` persist mọi tin; `GetByRoom()` + `CHAT_HISTORY` message gửi lại 50 tin gần nhất khi join |
+| Race condition GC xóa action chưa flush | `DeleteOlderThanSeq(oldestSeq - 200)` — safety margin khớp batch size |
+| `_canvasState` tăng vô hạn → RAM leak | Trim sau mỗi snapshot; `_canvasState` chỉ chứa delta; snapshot cache compressed |
+| Room rỗng tích luỹ mãi trong RAM | `CheckIdleRooms()` mỗi 60s; room rỗng > 30 phút bị dọn |
+| Token không hết hạn — token 6 tháng vẫn hợp lệ | `VerifyToken()` kiểm tra `issuedAt + 86400 > now` |
+| Không validate đầu vào → injection / crash | Validate tên phòng, màu vẽ, kích thước payload, độ dài chat |
+
+---
+
+# [2026-05-18] Database Persistence Layer — Full Implementation & Bug Fixes
+
+## CanvasApp.Common — DataAccess layer (toàn bộ từ stub trống → hoàn chỉnh)
+
+| File | Thay đổi |
+|------|----------|
+| `DataAccess/DatabaseManager.cs` | Rewrite thành `public static` connection factory: `Initialize(connStr)`, `OpenConnection()`, `IsInitialized` |
+| `DataAccess/UserDAO.cs` | Thêm `FindByUsername()`, `Insert()`, `UpdateLastLogin()` |
+| `DataAccess/RoomDAO.cs` | Thêm `Insert()`, `FindById()`, `GetAllActive()`, `SetActive()` |
+| `DataAccess/RoomMemberDAO.cs` | Thêm `Insert()`, `Find()`, `UpdateLastSeen()`, `GetMembers()` |
+| `DataAccess/DrawActionDAO.cs` | Thêm `InsertBatch()` (multi-row, 1 transaction), `GetSinceSeq()`, `MarkUndone()`, `DeleteOlderThanSeq()` |
+| `DataAccess/CanvasSnapshotDAO.cs` | Thêm `Insert()`, `GetLatest()`, `PruneOlderThan()` (giữ 5 snapshot gần nhất), `GetOldestKeptSeq()` |
+| `DataAccess/PersistenceQueue.cs` | **File mới** — `BlockingCollection<DrawAction>` write-behind queue, batch tối đa 200 actions/transaction |
+| `CanvasApp.Common.csproj` | Thêm reference `MySql.Data 9.6.0`; thêm compile entry cho `PersistenceQueue.cs` |
+| `packages.config` | Thêm `MySql.Data 9.6.0` |
+
+## CanvasApp.Common — Models
+
+| File | Thay đổi |
+|------|----------|
+| `Models/Models.cs` | Thêm class `CanvasSnapshot`; mở rộng `DrawAction` thêm 3 field DB-only (`[JsonIgnore]`): `RoomId`, `SeqNo`, `IsUndone` |
+
+## CanvasApp.AuthServer
+
+| File | Thay đổi |
+|------|----------|
+| `UserStore.cs` | Cập nhật toàn bộ `CREATE TABLE` với schema mới: thêm `last_login_at` (users), `password_hash`+`template` (rooms), `last_seen_at` (room_members), `seq_no`+`is_undone`+`client_ts` (draw_actions), `action_seq_at`+`byte_size` (canvas_snapshots). Thêm `MigrateSchema()` dùng `ALTER TABLE ADD COLUMN` (bỏ qua lỗi 1060 nếu cột đã tồn tại). Thêm cập nhật `last_login_at` trong `Login()` |
+
+## CanvasApp.Server
+
+| File | Thay đổi |
+|------|----------|
+| `RoomState.cs` | Rewrite: thêm `InitSeqNo()`, `SnapshotVersionFromDb()`, `NextSnapshotVersion()` (Interlocked — thread-safe), `_snapshotVersion` dùng `private int` thay vì `public int` |
+| `RoomManager.cs` | **Thay đổi lớn** — xem chi tiết bên dưới |
+| `AutoSaveService.cs` | **File mới** — timer 60s chụp snapshot, nén GZip+Base64, GC giữ 5 snapshot, `ForceSnapshot()` để gọi on-demand, `static Decompress()` để dùng lại khi recovery |
+| `Program.cs` | Khởi tạo DB, inject DAOs vào RoomManager, start PersistenceQueue + AutoSaveService, load rooms từ DB lúc startup; thêm handler `DRAW_UNDO`; `DRAW_CLEAR` gọi `ForceSnapshot`; force snapshot khi user cuối rời phòng; `_autoSave` và `_drawActionDao` là static field |
+
+### RoomManager.cs — chi tiết thay đổi
+
+- **Constructor** nhận thêm `CanvasSnapshotDAO` và `DrawActionDAO` (optional, null-safe)
+- **`LoadActiveRooms()`** — load tất cả room `is_active=TRUE` từ DB vào RAM khi server khởi động
+- **`EnsureCanvasLoaded(roomId)`** — lazy load snapshot + delta actions từ DB lần đầu client join room; dùng `_canvasLoaded` dictionary để chạy đúng 1 lần mỗi room
+- **`Join()`** — fix race condition MaxUsers: check `Count >= MaxUsers` chuyển vào trong `lock(_roomClients[roomId])`; gọi `EnsureCanvasLoaded()` trước khi trả canvas state
+- **`RecordDrawAction()`** — gán `SeqNo` từ `rs.NextSeqNo()`, push vào `_undoStacks` để track undo per-user
+- **`UndoLastAction(roomId, userId)`** — pop seqNo từ stack, xóa action khỏi `_canvasState`, trả seqNo cho caller mark DB
+- **`ClearCanvas()`** — xóa RAM, reset DirtyCount, xóa toàn bộ undo stacks của room
+- **`PrepareSnapshot()`** — dùng `rs.NextSnapshotVersion()` thay vì `++rs.SnapshotVersion` (fix atomicity bug)
+- **`GetMembers()`** — dùng `userId % colors.Length` thay `username.GetHashCode()` (stable across restarts)
+- **`GetDirtyRoomIds()`**, **`RoomExists()`**, **`IsRoomEmpty()`** — thêm mới để hỗ trợ AutoSaveService và Program.cs
+
+## Bug Fixes
+
+| Bug | Fix |
+|-----|-----|
+| Server restart mất toàn bộ state (room + canvas) | `LoadActiveRooms()` + `EnsureCanvasLoaded()` |
+| `DRAW_CLEAR` không xóa DB → restart replay lại canvas cũ | `ForceSnapshot()` sau khi clear (xóa draw_actions cũ) |
+| `DRAW_UNDO` bị bỏ qua hoàn toàn | Handler đầy đủ: xóa RAM + `MarkUndone()` DB + broadcast |
+| `autoSave` là local var → không gọi được từ `ProcessAsync` | Đổi thành `private static AutoSaveService _autoSave` |
+| `PersistenceQueue` chết lặng khi `CancellationToken` bị cancel | Bắt `OperationCanceledException`, drain queue trước khi thoát |
+| `++SnapshotVersion` không atomic | Thay bằng `Interlocked.Increment` qua `NextSnapshotVersion()` |
+| Race condition MaxUsers: 2 client cùng join vượt giới hạn | Check `Count >= MaxUsers` đưa vào trong `lock` |
+| Action bị drop âm thầm khi queue đầy | Log cảnh báo với drop counter |
+| `last_login_at` không bao giờ được cập nhật | Thêm `UPDATE users SET last_login_at=NOW()` trong `Login()` |
+| Avatar color thay đổi sau restart (GetHashCode không stable) | Dùng `userId % colors.Length` |
+| Snapshot cuối không được chụp khi user cuối rời phòng | `ForceSnapshot()` trong `HandleClient` finally block |
+
+---
+
 #  DONE:
 1. **Kiến trúc & Network:**
    - Hoàn thiện mô hình Multi Server với CanvasApp.AuthServer (Xử lý JWT, Register/Login), CanvasApp.Server (Quản lý phòng vẽ, Broadcast), và CanvasApp.LoadBalancer (chuyển hướng TCP và health check).
@@ -62,20 +219,27 @@ Done Foundation, giờ cần logic đồ họa và các tính năng sáng tạo:
 
 1. **Nhóm công cụ vẽ mở rộng (Drawing Tools):**
    - Hiện chỉ cọ vẽ và tẩy hoạt động. Cần bổ sung các hình khối (Rectangle, Ellipse/Circle, Line, Arrow), Chèn Text.
-   - Tính năng Tùy chỉnh độ dày nét vẽ (Line width) và cờ bật/tắt Đổ màu hình khối (Fill/Outline).\
+   - Tính năng Tùy chỉnh độ dày nét vẽ (Line width) và cờ bật/tắt Đổ màu hình khối (Fill/Outline).
    - Zoom + Pan bằng Matrix transform
+  > Dong Nguyen
 2. **Cơ chế Hoàn tác (Undo/Redo):** 
    - Cần một `Stack<DrawAction>` (ví dụ: Lưu canvas state trong ConcurrentDictionary<roomId, List<DrawAction>>) để lưu lại các bút vẽ và khôi phục khi nhấn phím tắt như Ctrl+Z.
+  > Dong Nguyen
 3. **Đồng bộ con trỏ chuột theo thời gian thực (Cursor Sync):**
    - Sự di chuyển chuột của mọi người cần được truyền qua mạng dựa trên Event `MouseMove` để hiển thị trên thiết bị khác.
+  > Kim Quyen
 4. **Export / Import Ảnh nền:** 
    - Tính năng xuất `Canvas` ra file PNG/JPEG (`ExportDialog`) qua hàm `DrawToBitmap`.
    - Tính năng chèn ảnh làm hình nền vào trong `Paint event`.
+  > Dong Nguyen
 5. **Tính năng sáng tạo:**
    - Thêm hệ thống Layers (tắt bật, thay đổi layer của từng người).
    - Replay hệ thống (tua lại quá trình vẽ dự theo log Timestamp lưu trong CSDL MySQL).
    - Quản lý giao diện phông nền theo dạng Template (Dotted, Lined, Grid).
 6. **Share link room**
+     > Kim Quyen
 7. **Load Balancer**
+     > Kim Quyen
 8. **Gợi ý hoàn thiện nét vẽ** (Kiểu vẽ hơi méo tự động gợi ý fix lại tròn,...)
-9. Xác thực email (kiểu check email real hay fake hoặc thêm cái dạng xác thực OTP qua mail càng tốt)
+9.  Xác thực email (kiểu check email real hay fake hoặc thêm cái dạng xác thực OTP qua mail càng tốt)
+      > Kim Quyen

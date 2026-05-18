@@ -135,21 +135,39 @@ namespace CanvasApp.Client
             CanvasClient.Instance.OnMessageReceived += OnServerMessage;
         }
 
-        public void SetRoom(Room room, List<DrawAction> initialState, List<RoomMember> initialMembers = null)
+        public void SetRoom(JoinRoomResult joinRes)
         {
-            _room = room;
-            _initialMembers = initialMembers ?? new List<RoomMember>();
+            _room = joinRes.Room;
+            _initialMembers = joinRes.Members ?? new List<RoomMember>();
             this.Load += (s, e) =>
             {
-                lblRoomName.Text = room.Name;
-                lblRoomCode.Text = $"Mã: {room.Id}";
-                foreach (var action in initialState)
-                    DrawActionLocal(action);
-                canvasPanel.Invalidate();
+                lblRoomName.Text = joinRes.Room.Name;
+                // Show the invite code so users can share it
+                var code = joinRes.Room.InviteCode ?? joinRes.Room.Id;
+                lblRoomCode.Text = $"Mã mời: {code}";
 
-                // Populate user list lúc join
+                // Apply compressed snapshot baseline first (if available),
+                // then apply the delta actions on top.
+                if (!string.IsNullOrEmpty(joinRes.SnapshotData))
+                {
+                    try
+                    {
+                        var baseline = SnapshotHelper.Decompress(joinRes.SnapshotData);
+                        foreach (var action in baseline)
+                            DrawActionLocal(action);
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendSystemMessage($"[Cảnh báo] Không thể tải snapshot: {ex.Message}");
+                    }
+                }
+
+                foreach (var action in joinRes.CanvasState)
+                    DrawActionLocal(action);
+
+                canvasPanel.Invalidate();
                 RenderUserList(_initialMembers);
-                AppendSystemMessage($"Bạn đã vào phòng '{room.Name}'.");
+                AppendSystemMessage($"Bạn đã vào phòng '{joinRes.Room.Name}'.");
             };
         }
 
@@ -445,6 +463,13 @@ namespace CanvasApp.Client
                     case MessageType.CHAT_MESSAGE:
                         var chat = msg.GetData<ChatMessage>();
                         AppendChatMessage(chat.Username, chat.Text);
+                        break;
+
+                    case MessageType.CHAT_HISTORY:
+                        var hist = msg.GetData<ChatHistoryResult>();
+                        if (hist?.Messages != null)
+                            foreach (var m in hist.Messages)
+                                AppendChatMessage(m.Username, m.Text);
                         break;
 
                     case MessageType.ROOM_UPDATE:

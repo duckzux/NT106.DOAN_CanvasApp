@@ -232,6 +232,10 @@ namespace CanvasApp.Client
             return SendAsync(new Message(MessageType.ROOM_LEAVE));
         }
 
+        public Task JoinRoomByCodeAsync(string inviteCode, string password = null) =>
+            SendAsync(new Message(MessageType.ROOM_JOIN_BY_CODE,
+                new InviteCodeRequest { InviteCode = inviteCode, Password = password }));
+
         public Task SendDrawAsync(string type, DrawAction action) =>
             SendAsync(new Message(type, action));
 

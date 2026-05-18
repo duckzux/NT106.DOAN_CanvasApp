@@ -39,7 +39,7 @@ Mặc định ứng dụng thường đang chạy ở `localhost` hoặc `127.0.
 - Mở file `.exe` của Client trên máy tính khác, điền các thông tin và test thử.
 #### Client:
 
-**Cách 1: Chạy trực tiếp bằng code trong Visual Studio (Khuyên dùng khi đang Code/Test)**
+**Chạy trực tiếp bằng code trong Visual Studio **
 1. Mở file **CanvasApp.sln** bằng Visual Studio.
 2. Trong cửa sổ **Solution Explorer** (thường nằm bên tay phải), tìm đến dự án **CanvasApp.Client**.
 3. Nhấp **chuột phải** vào CanvasApp.Client và chọn **"Set as Startup Project"** (để báo cho Visual Studio biết bạn muốn chạy project này lên đầu tiên). Khi đó tên project sẽ được in đậm.

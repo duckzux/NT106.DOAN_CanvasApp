@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Web;
 using System.Windows.Forms;
 using CanvasApp.Client.Controls;
 using CanvasApp.Common;
@@ -41,6 +42,7 @@ namespace CanvasApp.Client
             btnCircle.Click += (s, e) => _currentTool = "circle";
             btnLine.Click += (s, e) => _currentTool = "line";
             btnArrow.Click += (s, e) => _currentTool = "arrow";
+            btnText.Click += (s, e) => _currentTool = "text";
             btnClear.Click += async (s, e) =>
             {
                 if (MessageBox.Show("Xóa toàn bộ canvas?", "Xác nhận",
@@ -162,6 +164,43 @@ namespace CanvasApp.Client
         private async void Canvas_MouseDown(object sender, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left) return;
+
+            if (_currentTool == "text")
+            {
+                TextBox txtInput = new TextBox();
+                txtInput.Location = e.Location;
+                txtInput.Size = new Size(150, 25);
+                txtInput.Font = new Font("Arial", 14);
+                txtInput.ForeColor = _currentColor;
+
+                canvasPanel.Controls.Add(txtInput);
+                txtInput.Focus();
+
+                txtInput.KeyDown += async (s, args) =>
+                {
+                    if (args.KeyCode == Keys.Enter)
+                    {
+                        string textToDraw = txtInput.Text.Trim();
+                        if (!string.IsNullOrEmpty(textToDraw))
+                        {
+                            var textAction = new DrawAction
+                            {
+                                Type = "text: " + textToDraw,
+                                Color = ColorToHex(_currentColor),
+                                Thickness = 14,
+                                Points = new List<Common.PointF> { new Common.PointF(e.X, e.Y) }
+                            };
+                            DrawActionLocal(textAction);
+                            canvasPanel.Invalidate();
+                            await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_SHAPE, textAction);
+                        }
+                        canvasPanel.Controls.Remove(txtInput);
+                        txtInput.Dispose();
+                    }
+                };
+                return;
+            }
+
             _isDrawing = true;
             _lastPoint = new Common.PointF(e.X, e.Y);
             _currentPoint = _lastPoint;
@@ -241,6 +280,18 @@ namespace CanvasApp.Client
                 return;
             }
             if (_graphics == null || action.Points == null || action.Points.Count < 2) return;
+
+            if (action.Type.StartsWith("text:"))
+            {
+                string textContent = action.Type.Substring(5); 
+                using (Font font = new Font("Arial", action.Thickness))
+                using (SolidBrush brush = new SolidBrush(HexToColor(action.Color)))
+                {
+                    _graphics.DrawString(textContent, font, brush, action.Points[0].X, action.Points[0].Y);
+                }
+                return;
+            }
+
             for (int i = 1; i < action.Points.Count; i++)
                 DrawLineLocal(action.Points[i - 1], action.Points[i], action.Color, action.Thickness);
         }

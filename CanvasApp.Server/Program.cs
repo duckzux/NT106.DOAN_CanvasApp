@@ -20,8 +20,9 @@ namespace CanvasApp.Server
         private static DrawActionDAO _drawActionDao;
         private static ChatMessageDAO _chatDao;
 
-        // Max payload size per message (64 KB). Rejects oversized action_data.
-        private const int MaxPayloadBytes = 65_536;
+        // Max payload size per message. Rejects oversized payloads.
+        // File attachments (CHAT_FILE) can be up to 2 MB raw → ~2.7 MB base64; allow 4 MB total.
+        private const int MaxPayloadBytes = 4_194_304;
         // Max room name length
         private const int MaxRoomNameLength = 100;
         // Regex for HTML-style color string (#RRGGBB or #RGB)
@@ -269,6 +270,19 @@ namespace CanvasApp.Server
                         }
                         break;
 
+                    case MessageType.DRAW_FILL:
+                        if (!string.IsNullOrEmpty(client.CurrentRoomId))
+                        {
+                            var fillAct = msg.GetData<DrawAction>();
+                            if (fillAct != null)
+                            {
+                                fillAct.UserId = client.UserId;
+                                _roomManager.RecordDrawAction(client.CurrentRoomId, fillAct);
+                            }
+                            await _roomManager.BroadcastAsync(client.CurrentRoomId, msg, client);
+                        }
+                        break;
+
                     case MessageType.DRAW_UNDO:
                         if (!string.IsNullOrEmpty(client.CurrentRoomId))
                         {
@@ -324,6 +338,24 @@ namespace CanvasApp.Server
 
                             await _roomManager.BroadcastAsync(client.CurrentRoomId,
                                 new Message(MessageType.CHAT_MESSAGE, chat));
+                        }
+                        break;
+
+                    case MessageType.CHAT_FILE:
+                        if (!string.IsNullOrEmpty(client.CurrentRoomId))
+                        {
+                            var fileMsg = msg.GetData<ChatMessage>();
+                            if (fileMsg == null
+                                || string.IsNullOrWhiteSpace(fileMsg.FileName)
+                                || string.IsNullOrEmpty(fileMsg.FileData)) break;
+
+                            fileMsg.UserId = client.UserId;
+                            fileMsg.Username = client.Username;
+                            fileMsg.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+                            // Broadcast file to room; do not persist to DB
+                            await _roomManager.BroadcastAsync(client.CurrentRoomId,
+                                new Message(MessageType.CHAT_FILE, fileMsg));
                         }
                         break;
 

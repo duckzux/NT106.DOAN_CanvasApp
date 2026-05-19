@@ -242,6 +242,14 @@ namespace CanvasApp.Client
         public Task SendChatAsync(string text) =>
             SendAsync(new Message(MessageType.CHAT_MESSAGE, new ChatMessage { Text = text }));
 
+        public Task SendFileAsync(string fileName, byte[] data) =>
+            SendAsync(new Message(MessageType.CHAT_FILE, new ChatMessage
+            {
+                FileName = fileName,
+                FileData = Convert.ToBase64String(data),
+                FileSizeBytes = data.Length
+            }));
+
         /// <summary>Explicitly request a full canvas snapshot from the server.</summary>
         public Task RequestCanvasStateAsync() =>
             SendAsync(new Message(MessageType.CANVAS_STATE));

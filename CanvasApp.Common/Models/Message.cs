@@ -63,6 +63,7 @@ namespace CanvasApp.Common
         public const string DRAW_TEXT = "DRAW_TEXT";
         public const string DRAW_CLEAR = "DRAW_CLEAR";
         public const string DRAW_UNDO = "DRAW_UNDO";
+        public const string DRAW_FILL = "DRAW_FILL";
 
         // Canvas state sync
         public const string CANVAS_STATE = "CANVAS_STATE";
@@ -73,6 +74,7 @@ namespace CanvasApp.Common
         // Chat
         public const string CHAT_MESSAGE = "CHAT_MESSAGE";
         public const string CHAT_HISTORY = "CHAT_HISTORY";
+        public const string CHAT_FILE = "CHAT_FILE";
 
         // Generic
         public const string ERROR = "ERROR";

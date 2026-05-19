@@ -162,5 +162,9 @@ namespace CanvasApp.Common
         [JsonProperty("username")] public string Username { get; set; }
         [JsonProperty("text")] public string Text { get; set; }
         [JsonProperty("timestamp")] public long Timestamp { get; set; }
+        // File attachment fields (null for regular text messages)
+        [JsonProperty("fileName")] public string FileName { get; set; }
+        [JsonProperty("fileData")] public string FileData { get; set; }
+        [JsonProperty("fileSizeBytes")] public long FileSizeBytes { get; set; }
     }
 }

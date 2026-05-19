@@ -1,4 +1,71 @@
 
+# [2026-05-19] Fix — Canvas Không Giới Hạn Vùng Vẽ + Sửa Nút Chat
+
+## CanvasApp.Client
+
+### Vùng vẽ không giới hạn (Dynamic Canvas Expansion)
+
+| File | Thay đổi |
+|------|----------|
+| `Forms/CanvasForm.cs` | Thêm method `EnsureCanvasCovers(float cx, float cy)` — trước mỗi thao tác vẽ, kiểm tra nếu tọa độ canvas ánh xạ ra ngoài biên bitmap (khoảng đệm 200 px) thì tự động mở rộng bitmap thêm **2000 px** về phía cần thiết: tạo `newBitmap` mới, copy nội dung cũ vào đúng vị trí, cập nhật `_canvasOffsetX`/`_canvasOffsetY`, tái tạo `_graphics` với `TranslateTransform` mới; canvas trở nên **không giới hạn kích thước** |
+| `Forms/CanvasForm.cs` | Gọi `EnsureCanvasCovers` trước tất cả thao tác ghi lên bitmap: `DrawLineLocal` (pen freehand), `EraseLineLocal` (eraser), `DrawActionLocal` nhánh shape (rectangle/circle/line/arrow), nhánh text, nhánh fill; `Canvas_MouseDown` nhánh fill tool (tính `bx`/`by` sau khi đã expand) |
+
+### Fix hiển thị nút chat
+
+| File | Thay đổi |
+|------|----------|
+| `Forms/CanvasForm.Designer.cs` | `btnSendMessage.Text`: `" ➤"` → `">"` — ký tự Dingbat `U+27A4` không render được trên `Guna2Button` (hiện trống); thay bằng ASCII `>` luôn hiển thị đúng |
+| `Forms/CanvasForm.Designer.cs` | `btnSendMessage.Font`: 9F Regular → **13F Bold** — font nhỏ Regular quá mờ, đồng bộ cỡ chữ với nút đính kèm |
+| `Forms/CanvasForm.Designer.cs` | `btnAttachFile.Font`: 15F Bold → **13F Bold** — giảm xuống cho đồng đều với nút gửi |
+
+## Bug Fixes
+
+| Bug | Fix |
+|-----|-----|
+| Không vẽ được ở nửa trái / vùng xung quanh khi zoom out hoặc pan | Bitmap cố định (`panelWidth × 2`) — tọa độ canvas vượt biên bị GDI+ clip ngầm. Fix: `EnsureCanvasCovers` tự expand bitmap mỗi khi cần, không có giới hạn vùng vẽ |
+| Khi export ảnh nội dung bị giới hạn, không xuất được vùng đã vẽ ngoài bitmap ban đầu | Cùng nguyên nhân trên; sau fix, bitmap luôn đủ lớn chứa toàn bộ nét vẽ nên `GetContentBounds` + export hoạt động đúng |
+| Nút gửi tin nhắn hiển thị trống (không thấy mũi tên) | `" ➤"` (Unicode Dingbat) không có glyph trong font Segoe UI 9pt trên Guna2Button. Fix: đổi sang `">"` ASCII |
+| Hai nút chat kích thước font không đồng đều | `btnAttachFile` 15F vs `btnSendMessage` 9F. Fix: cả hai thống nhất 13F Bold |
+
+---
+
+# [2026-05-19] Chat — Gửi & Tải File Đính Kèm + Fix Layout Input Area
+
+## CanvasApp.Common
+
+| File | Thay đổi |
+|------|----------|
+| `Models/Models.cs` | `ChatMessage`: thêm 3 field `FileName` (`string`), `FileData` (`string`, Base64), `FileSizeBytes` (`long`) để mang dữ liệu file đính kèm; field null với tin nhắn text thường |
+| `Models/Message.cs` | Thêm hằng `CHAT_FILE = "CHAT_FILE"` vào `MessageType` |
+
+## CanvasApp.Server
+
+| File | Thay đổi |
+|------|----------|
+| `Program.cs` | Tăng `MaxPayloadBytes` từ 64 KB lên **4 MB** để chứa file Base64 tối đa 2 MB raw (~2.7 MB sau encode); thêm `case MessageType.CHAT_FILE` — kiểm tra `FileName`/`FileData` không rỗng, gán `UserId`/`Username`/`Timestamp` từ token, broadcast tới room; file **không** được persist vào DB |
+
+## CanvasApp.Client — Network
+
+| File | Thay đổi |
+|------|----------|
+| `Network/CanvasClient.cs` | Thêm method `SendFileAsync(string fileName, byte[] data)` — encode Base64 và gửi `CHAT_FILE` message |
+
+## CanvasApp.Client — UI
+
+| File | Thay đổi |
+|------|----------|
+| `Forms/CanvasForm.Designer.cs` | Thêm `btnAttachFile` (`Guna2Button`, `"+"`, 36×42, purple, `BorderRadius=20`, `Font 15F Bold`); điều chỉnh `txtMessageInput` từ `(6,693) 182×48` → `(48,693) 136×48`; điều chỉnh `btnSendMessage` từ `(194,696) 49×45` → `(192,696) 50×42` — căn giữa dọc 3 controls so với nhau |
+| `Forms/CanvasForm.cs` | Thêm field `_chatFiles` (`Dictionary<string,(FileName,Data)>`); wire `btnAttachFile.Click` → `AttachFile()`; bật `rtbChatHistory.DetectUrls = true`; `LinkClicked` handler: intercept `https://canvas-file/{id}` → mở `SaveFileDialog` để tải file từ `_chatFiles`; thêm `AttachFile()` (mở `OpenFileDialog`, giới hạn 2 MB, gọi `SendFileAsync`); thêm `AppendFileMessage()` hiển thị `"📎 filename (size)"` kèm link download; thêm `FormatFileSize()` helper (B/KB/MB); thêm `case MessageType.CHAT_FILE` trong message handler — decode Base64, lưu vào `_chatFiles`, gọi `AppendFileMessage` |
+
+## Bug Fixes / UX
+
+| Vấn đề | Fix |
+|--------|-----|
+| Emoji `📎` không render được trên `Guna2Button` (hiển thị hình thoi) | Đổi text nút đính kèm thành `"+"` (ASCII), tăng font 15F Bold |
+| Nút gửi và nút đính kèm không căn giữa dọc với ô nhập | Đồng bộ lại `Location.Y` và `Height` của 3 controls (`btnAttachFile`, `txtMessageInput`, `btnSendMessage`) |
+
+---
+
 # [2026-05-19] Canvas Drawing & Export — Bug Fixes & Virtual Canvas Expansion
 
 ## CanvasApp.Client

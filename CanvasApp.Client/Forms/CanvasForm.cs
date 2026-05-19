@@ -39,6 +39,17 @@ namespace CanvasApp.Client
         private string _template = "Blank";
         private List<RoomMember> _initialMembers; // members lúc join (truyền từ LobbyForm)
 
+        // ── Inline text editing state ───────────────────────────────────
+        private bool _textEditActive;
+        private string _editText = "";
+        private Common.PointF _editCanvasPos;
+        private System.Windows.Forms.Timer _cursorTimer;
+        private bool _cursorVisible = true;
+
+        // Chat file storage: fileId → (FileName, Data)
+        private readonly Dictionary<string, (string FileName, byte[] Data)> _chatFiles =
+            new Dictionary<string, (string, byte[])>();
+
         public CanvasForm()
         {
             InitializeComponent();
@@ -57,7 +68,16 @@ namespace CanvasApp.Client
             this.Load += (s, e) => InitCanvas();
             this.KeyPreview = true;
             this.KeyDown += CanvasForm_KeyDown;
+            this.KeyPress += CanvasForm_KeyPress;
             canvasPanel.Paint += CanvasPanel_Paint;
+
+            _cursorTimer = new System.Windows.Forms.Timer { Interval = 530 };
+            _cursorTimer.Tick += (s, ev) =>
+            {
+                _cursorVisible = !_cursorVisible;
+                if (_textEditActive) canvasPanel.Invalidate();
+            };
+            _cursorTimer.Start();
             canvasPanel.MouseDown += Canvas_MouseDown;
             canvasPanel.MouseMove += Canvas_MouseMove;
             canvasPanel.MouseUp += Canvas_MouseUp;
@@ -156,6 +176,7 @@ namespace CanvasApp.Client
             btnLine.Click += (s, e) => _currentTool = "line";
             btnArrow.Click += (s, e) => _currentTool = "arrow";
             btnText.Click += (s, e) => _currentTool = "text";
+            chkFill.Click += (s, e) => _currentTool = "fill";
             
             btnClear.Click += async (s, e) =>
             {
@@ -179,6 +200,20 @@ namespace CanvasApp.Client
             txtMessageInput.KeyDown += async (s, e) =>
             {
                 if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await SendChat(); }
+            };
+            btnAttachFile.Click += async (s, e) => await AttachFile();
+            rtbChatHistory.DetectUrls = true;
+            rtbChatHistory.LinkClicked += (s, e) =>
+            {
+                const string prefix = "https://canvas-file/";
+                if (!e.LinkText.StartsWith(prefix)) return;
+                var fileId = e.LinkText.Substring(prefix.Length);
+                if (_chatFiles.TryGetValue(fileId, out var entry))
+                {
+                    using (var sfd = new SaveFileDialog { FileName = entry.FileName })
+                        if (sfd.ShowDialog() == DialogResult.OK)
+                            System.IO.File.WriteAllBytes(sfd.FileName, entry.Data);
+                }
             };
 
             // Copy invite code button
@@ -293,6 +328,30 @@ namespace CanvasApp.Client
             if (_isDrawing && _currentStroke != null && IsShapeTool(_currentTool))
             {
                 DrawShape(e.Graphics, _currentStroke.Type, _lastPoint, _currentPoint, _currentStroke.Color, _currentStroke.Thickness);
+            }
+
+            // Inline text editing preview — no background, no border
+            if (_textEditActive)
+            {
+                float fontSize = Math.Max(8f, _thickness);
+                using (var font = new Font("Arial", fontSize, FontStyle.Regular, GraphicsUnit.Point))
+                using (var brush = new SolidBrush(_currentColor))
+                {
+                    e.Graphics.DrawString(_editText, font, brush, _editCanvasPos.X, _editCanvasPos.Y);
+                    if (_cursorVisible)
+                    {
+                        var origin = System.Drawing.PointF.Empty;
+                        SizeF sz = e.Graphics.MeasureString(
+                            _editText.Length == 0 ? " " : _editText, font,
+                            origin, StringFormat.GenericTypographic);
+                        float cx = _editCanvasPos.X +
+                            (_editText.Length == 0 ? 0 :
+                             e.Graphics.MeasureString(_editText, font, origin,
+                                 StringFormat.GenericTypographic).Width);
+                        using (var pen = new Pen(_currentColor, Math.Max(0.5f, 1f / _zoom)))
+                            e.Graphics.DrawLine(pen, cx, _editCanvasPos.Y, cx, _editCanvasPos.Y + sz.Height);
+                    }
+                }
             }
         }
 
@@ -473,44 +532,34 @@ namespace CanvasApp.Client
 
             if (e.Button != MouseButtons.Left) return;
 
+            if (_textEditActive)
+                CommitTextEdit();
+
             if (_currentTool == "text")
             {
-                TextBox txtInput = new TextBox();
-                txtInput.Location = e.Location;
-                txtInput.Size = new Size(150, 25);
-                txtInput.Font = new Font("Arial", 14);
-                txtInput.ForeColor = _currentColor;
+                _textEditActive = true;
+                _editText = "";
+                _editCanvasPos = ScreenToCanvas(e.X, e.Y);
+                _cursorVisible = true;
+                canvasPanel.Invalidate();
+                return;
+            }
 
-                canvasPanel.Controls.Add(txtInput);
-                txtInput.Focus();
-
-                txtInput.KeyDown += async (s, args) =>
+            if (_currentTool == "fill")
+            {
+                var pt = ScreenToCanvas(e.X, e.Y);
+                EnsureCanvasCovers(pt.X, pt.Y);
+                int bx = (int)(pt.X + _canvasOffsetX);
+                int by = (int)(pt.Y + _canvasOffsetY);
+                FloodFill(bx, by, _currentColor);
+                canvasPanel.Invalidate();
+                var fillAction = new DrawAction
                 {
-                    if (args.KeyCode == Keys.Enter)
-                    {
-                        string textToDraw = txtInput.Text.Trim();
-                        if (!string.IsNullOrEmpty(textToDraw))
-                        {
-                            var textAction = new DrawAction
-                            {
-                                Type = "text:" + textToDraw,
-                                Color = ColorToHex(_currentColor),
-                                Thickness = 14,
-                                Points = new List<Common.PointF> { ScreenToCanvas(e.X, e.Y) }
-                            };
-                            DrawActionLocal(textAction);
-
-                            _undoStack.Push(textAction);
-                            _redoStack.Clear();
-
-
-                            canvasPanel.Invalidate();
-                            await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_SHAPE, textAction);
-                        }
-                        canvasPanel.Controls.Remove(txtInput);
-                        txtInput.Dispose();
-                    }
+                    Type = "fill",
+                    Color = ColorToHex(_currentColor),
+                    Points = new List<Common.PointF> { pt }
                 };
+                await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_FILL, fillAction);
                 return;
             }
 
@@ -559,7 +608,10 @@ namespace CanvasApp.Client
             }
             else
             {
-                DrawLineLocal(_lastPoint, current, _currentStroke.Color, _currentStroke.Thickness);
+                if (_currentTool == "eraser")
+                    EraseLineLocal(_lastPoint, current, _currentStroke.Thickness);
+                else
+                    DrawLineLocal(_lastPoint, current, _currentStroke.Color, _currentStroke.Thickness);
                 _currentStroke.Points.Add(current);
 
                 await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_MOVE, new DrawAction
@@ -644,19 +696,38 @@ namespace CanvasApp.Client
             if (action.Type.Contains("rectangle") || action.Type.Contains("circle") || action.Type.Contains("line") || action.Type.Contains("arrow"))
             {
                 if (action.Points.Count < 2) return;
+                EnsureCanvasCovers(action.Points[0].X, action.Points[0].Y);
+                EnsureCanvasCovers(action.Points[1].X, action.Points[1].Y);
                 DrawShape(_graphics, action.Type, action.Points[0], action.Points[1], action.Color, action.Thickness);
                 return;
             }
-            if (action.Points.Count < 2) return;
-
             if (action.Type.StartsWith("text:"))
             {
-                string textContent = action.Type.Substring(5); 
-                using (Font font = new Font("Arial", action.Thickness))
-                using (SolidBrush brush = new SolidBrush(HexToColor(action.Color)))
-                {
+                if (action.Points.Count < 1) return;
+                EnsureCanvasCovers(action.Points[0].X, action.Points[0].Y);
+                string textContent = action.Type.Substring(5);
+                using (var font = new Font("Arial", Math.Max(1f, action.Thickness), FontStyle.Regular, GraphicsUnit.Point))
+                using (var brush = new SolidBrush(HexToColor(action.Color)))
                     _graphics.DrawString(textContent, font, brush, action.Points[0].X, action.Points[0].Y);
-                }
+                return;
+            }
+
+            if (action.Type == "fill")
+            {
+                if (action.Points.Count < 1) return;
+                EnsureCanvasCovers(action.Points[0].X, action.Points[0].Y);
+                int bx = (int)(action.Points[0].X + _canvasOffsetX);
+                int by = (int)(action.Points[0].Y + _canvasOffsetY);
+                FloodFill(bx, by, HexToColor(action.Color));
+                return;
+            }
+
+            if (action.Points.Count < 2) return;
+
+            if (action.Type == "eraser")
+            {
+                for (int i = 1; i < action.Points.Count; i++)
+                    EraseLineLocal(action.Points[i - 1], action.Points[i], action.Thickness);
                 return;
             }
 
@@ -666,10 +737,114 @@ namespace CanvasApp.Client
 
         private void DrawLineLocal(Common.PointF from, Common.PointF to, string colorHex, int thickness)
         {
+            EnsureCanvasCovers(from.X, from.Y);
+            EnsureCanvasCovers(to.X, to.Y);
             using (var pen = new Pen(HexToColor(colorHex), thickness) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-            {
                 _graphics.DrawLine(pen, from.X, from.Y, to.X, to.Y);
+        }
+
+        private void EraseLineLocal(Common.PointF from, Common.PointF to, int thickness)
+        {
+            EnsureCanvasCovers(from.X, from.Y);
+            EnsureCanvasCovers(to.X, to.Y);
+            var saved = _graphics.CompositingMode;
+            _graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+            using (var pen = new Pen(Color.FromArgb(0, 0, 0, 0), thickness)
+                   { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                _graphics.DrawLine(pen, from.X, from.Y, to.X, to.Y);
+            _graphics.CompositingMode = saved;
+        }
+
+        // Expands the bitmap if canvas point (cx, cy) maps outside the current bitmap bounds.
+        // All draw calls go through this so the canvas is effectively unbounded.
+        private void EnsureCanvasCovers(float cx, float cy)
+        {
+            if (_bitmap == null) return;
+
+            const int margin = 200;
+            const int grow   = 2000;
+
+            int bx = (int)(cx + _canvasOffsetX);
+            int by = (int)(cy + _canvasOffsetY);
+
+            int growLeft   = bx < margin                    ? grow + margin - bx                         : 0;
+            int growTop    = by < margin                    ? grow + margin - by                         : 0;
+            int growRight  = bx >= _bitmap.Width  - margin  ? grow + bx - _bitmap.Width  + margin + 1   : 0;
+            int growBottom = by >= _bitmap.Height - margin  ? grow + by - _bitmap.Height + margin + 1   : 0;
+
+            if (growLeft == 0 && growTop == 0 && growRight == 0 && growBottom == 0) return;
+
+            int newW = _bitmap.Width  + growLeft + growRight;
+            int newH = _bitmap.Height + growTop  + growBottom;
+
+            var newBitmap = new Bitmap(newW, newH);
+            using (var g = Graphics.FromImage(newBitmap))
+            {
+                g.Clear(Color.Transparent);
+                g.DrawImage(_bitmap, growLeft, growTop);
             }
+
+            _canvasOffsetX += growLeft;
+            _canvasOffsetY += growTop;
+
+            _graphics.Dispose();
+            _bitmap.Dispose();
+
+            _bitmap = newBitmap;
+            _graphics = Graphics.FromImage(_bitmap);
+            _graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            _graphics.TranslateTransform(_canvasOffsetX, _canvasOffsetY);
+        }
+
+        private void FloodFill(int bitmapX, int bitmapY, Color fillColor)
+        {
+            if (_bitmap == null) return;
+            int bw = _bitmap.Width, bh = _bitmap.Height;
+            if (bitmapX < 0 || bitmapX >= bw || bitmapY < 0 || bitmapY >= bh) return;
+
+            var bmpData = _bitmap.LockBits(new Rectangle(0, 0, bw, bh),
+                System.Drawing.Imaging.ImageLockMode.ReadWrite,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            int stride = bmpData.Stride;
+            byte[] pixels = new byte[stride * bh];
+            System.Runtime.InteropServices.Marshal.Copy(bmpData.Scan0, pixels, 0, pixels.Length);
+
+            int si = bitmapY * stride + bitmapX * 4;
+            byte tB = pixels[si], tG = pixels[si + 1], tR = pixels[si + 2], tA = pixels[si + 3];
+            byte fB = fillColor.B, fG = fillColor.G, fR = fillColor.R, fA = fillColor.A;
+
+            if (tB == fB && tG == fG && tR == fR && tA == fA)
+            {
+                _bitmap.UnlockBits(bmpData);
+                return;
+            }
+
+            var queue = new Queue<int>();
+            var visited = new bool[bw * bh];
+            queue.Enqueue(bitmapY * bw + bitmapX);
+
+            while (queue.Count > 0)
+            {
+                int idx = queue.Dequeue();
+                int x = idx % bw, y = idx / bw;
+                if (visited[idx]) continue;
+                visited[idx] = true;
+
+                int pi = y * stride + x * 4;
+                if (pixels[pi] != tB || pixels[pi + 1] != tG ||
+                    pixels[pi + 2] != tR || pixels[pi + 3] != tA) continue;
+
+                pixels[pi] = fB; pixels[pi + 1] = fG;
+                pixels[pi + 2] = fR; pixels[pi + 3] = fA;
+
+                if (x + 1 < bw)  queue.Enqueue(y * bw + x + 1);
+                if (x - 1 >= 0)  queue.Enqueue(y * bw + x - 1);
+                if (y + 1 < bh)  queue.Enqueue((y + 1) * bw + x);
+                if (y - 1 >= 0)  queue.Enqueue((y - 1) * bw + x);
+            }
+
+            System.Runtime.InteropServices.Marshal.Copy(pixels, 0, bmpData.Scan0, pixels.Length);
+            _bitmap.UnlockBits(bmpData);
         }
 
         // ── Server message handler ──────────────────────────────────────
@@ -683,6 +858,7 @@ namespace CanvasApp.Client
                     case MessageType.DRAW_MOVE:
                     case MessageType.DRAW_END:
                     case MessageType.DRAW_SHAPE:
+                    case MessageType.DRAW_FILL:
                         var action = msg.GetData<DrawAction>();
                         DrawActionLocal(action);
                         canvasPanel.Invalidate();
@@ -704,6 +880,15 @@ namespace CanvasApp.Client
                                 AppendChatMessage(m.Username, m.Text);
                         break;
 
+                    case MessageType.CHAT_FILE:
+                        var fileMsg = msg.GetData<ChatMessage>();
+                        if (fileMsg?.FileData != null)
+                        {
+                            var fileId = Guid.NewGuid().ToString("N").Substring(0, 12);
+                            _chatFiles[fileId] = (fileMsg.FileName, Convert.FromBase64String(fileMsg.FileData));
+                            AppendFileMessage(fileMsg.Username, fileMsg.FileName, fileMsg.FileSizeBytes, fileId);
+                        }
+                        break;
 
                     case MessageType.ROOM_UPDATE:
                         // ── Strongly-typed parse ────────────────────────
@@ -751,6 +936,25 @@ namespace CanvasApp.Client
             // Không append local — server sẽ broadcast lại cho mình thấy
         }
 
+        private async System.Threading.Tasks.Task AttachFile()
+        {
+            using (var ofd = new OpenFileDialog { Title = "Chọn file để gửi" })
+            {
+                if (ofd.ShowDialog() != DialogResult.OK) return;
+                var info = new System.IO.FileInfo(ofd.FileName);
+                const long maxBytes = 2L * 1024 * 1024; // 2 MB
+                if (info.Length > maxBytes)
+                {
+                    MessageBox.Show("File quá lớn (tối đa 2 MB).", "Lỗi",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                var data = System.IO.File.ReadAllBytes(ofd.FileName);
+                var fileName = System.IO.Path.GetFileName(ofd.FileName);
+                await CanvasClient.Instance.SendFileAsync(fileName, data);
+            }
+        }
+
         private void AppendChatMessage(string user, string text)
         {
             if (this.InvokeRequired)
@@ -787,6 +991,35 @@ namespace CanvasApp.Client
             rtbChatHistory.SelectionColor = rtbChatHistory.ForeColor;
             rtbChatHistory.SelectionFont = rtbChatHistory.Font;
             rtbChatHistory.ScrollToCaret();
+        }
+
+        private void AppendFileMessage(string user, string fileName, long sizeBytes, string fileId)
+        {
+            if (this.InvokeRequired)
+            {
+                this.Invoke(new Action(() => AppendFileMessage(user, fileName, sizeBytes, fileId)));
+                return;
+            }
+            bool isMe = user == Session.CurrentUser?.Username;
+            rtbChatHistory.SelectionStart = rtbChatHistory.TextLength;
+            rtbChatHistory.SelectionLength = 0;
+            rtbChatHistory.SelectionFont = new Font(rtbChatHistory.Font, FontStyle.Bold);
+            rtbChatHistory.SelectionColor = isMe ? Color.FromArgb(120, 86, 207) : Color.Black;
+            rtbChatHistory.AppendText($"{(isMe ? "Bạn" : user)}: 📎 {fileName} ({FormatFileSize(sizeBytes)})\r\n");
+            rtbChatHistory.SelectionFont = new Font(rtbChatHistory.Font, FontStyle.Regular);
+            rtbChatHistory.SelectionColor = Color.DimGray;
+            // Hiển thị link tải xuống — RichTextBox tự detect https:// thành link có thể nhấp
+            rtbChatHistory.AppendText($"    https://canvas-file/{fileId}\r\n");
+            rtbChatHistory.SelectionFont = rtbChatHistory.Font;
+            rtbChatHistory.SelectionColor = rtbChatHistory.ForeColor;
+            rtbChatHistory.ScrollToCaret();
+        }
+
+        private static string FormatFileSize(long bytes)
+        {
+            if (bytes < 1024) return $"{bytes} B";
+            if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+            return $"{bytes / (1024.0 * 1024):F1} MB";
         }
 
         // ── Color palette ───────────────────────────────────────────────
@@ -840,6 +1073,30 @@ namespace CanvasApp.Client
 
         private void CanvasForm_KeyDown(object sender, KeyEventArgs e)
         {
+            if (_textEditActive)
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    CommitTextEdit();
+                    e.SuppressKeyPress = true;
+                    return;
+                }
+                if (e.KeyCode == Keys.Escape)
+                {
+                    CancelTextEdit();
+                    e.SuppressKeyPress = true;
+                    return;
+                }
+                if (e.KeyCode == Keys.Back)
+                {
+                    if (_editText.Length > 0)
+                        _editText = _editText.Substring(0, _editText.Length - 1);
+                    canvasPanel.Invalidate();
+                    e.SuppressKeyPress = true;
+                }
+                return; // block Ctrl+Z / Ctrl+Y while typing
+            }
+
             if (e.Control && e.KeyCode == Keys.Z)
             {
                 btnUndo.PerformClick();
@@ -850,6 +1107,47 @@ namespace CanvasApp.Client
                 btnRedo.PerformClick();
                 e.SuppressKeyPress = true;
             }
+        }
+
+        private void CanvasForm_KeyPress(object sender, KeyPressEventArgs e)
+        {
+            if (!_textEditActive) return;
+            if (e.KeyChar == '\r' || e.KeyChar == '\b' || e.KeyChar == '\x1b') return;
+            if (e.KeyChar >= 32)
+            {
+                _editText += e.KeyChar;
+                canvasPanel.Invalidate();
+            }
+            e.Handled = true;
+        }
+
+        private async void CommitTextEdit()
+        {
+            _textEditActive = false;
+            string text = _editText.Trim();
+            _editText = "";
+            canvasPanel.Invalidate();
+            if (string.IsNullOrEmpty(text)) return;
+
+            var textAction = new DrawAction
+            {
+                Type = "text:" + text,
+                Color = ColorToHex(_currentColor),
+                Thickness = Math.Max(8, _thickness),
+                Points = new List<Common.PointF> { _editCanvasPos }
+            };
+            DrawActionLocal(textAction);
+            _undoStack.Push(textAction);
+            _redoStack.Clear();
+            canvasPanel.Invalidate();
+            await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_SHAPE, textAction);
+        }
+
+        private void CancelTextEdit()
+        {
+            _textEditActive = false;
+            _editText = "";
+            canvasPanel.Invalidate();
         }
 
         // ── Shape & Brush Utilities ─────────────────────────────────────
@@ -872,6 +1170,11 @@ namespace CanvasApp.Client
         }
 
         private void btnCopyCode_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void btnAttachFile_Click(object sender, EventArgs e)
         {
 
         }

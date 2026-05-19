@@ -25,7 +25,6 @@ namespace CanvasApp.Client
 
             this.Load += async (s, e) =>
             {
-                lblTitle.Text = $"Xin chào, {Session.CurrentUser?.Username}";
                 AddJoinByCodeButton();
                 await CanvasClient.Instance.RequestRoomListAsync();
             };

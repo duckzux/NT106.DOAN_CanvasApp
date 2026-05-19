@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Linq;
 using System.Web;
 using System.Web.Configuration;
 using System.Windows.Forms;
@@ -15,8 +14,6 @@ namespace CanvasApp.Client
     {
         // ── Drawing state ───────────────────────────────────────────────
         private Bitmap _bitmap;
-        private Stack<DrawAction> _undoStack = new Stack<DrawAction>();
-        private Stack<DrawAction> _redoStack = new Stack<DrawAction>();
         private Graphics _graphics;
         private bool _isDrawing = false;
         private Common.PointF _lastPoint;
@@ -38,6 +35,7 @@ namespace CanvasApp.Client
         public CanvasForm()
         {
             InitializeComponent();
+            ApplyToolbarIcons();
             //Chống nhấp nháy màn hình khi vẽ 
             typeof(Panel).InvokeMember("DoubleBuffered",
                 System.Reflection.BindingFlags.SetProperty |
@@ -46,8 +44,6 @@ namespace CanvasApp.Client
                 null, canvasPanel, new object[] { true });
 
             this.Load += (s, e) => InitCanvas();
-            this.KeyPreview = true;
-            this.KeyDown += CanvasForm_KeyDown;
             canvasPanel.Paint += CanvasPanel_Paint;
             canvasPanel.MouseDown += Canvas_MouseDown;
             canvasPanel.MouseMove += Canvas_MouseMove;
@@ -57,26 +53,7 @@ namespace CanvasApp.Client
             // Tools
             btnPen.Click += (s, e) => _currentTool = "pen";
             btnEraser.Click += (s, e) => _currentTool = "eraser";
-            // Undo - Redo
-            btnUndo.Click += (s, e) =>
-            {
-                if (_undoStack.Count > 0)
-                {
-                    _redoStack.Push(_undoStack.Pop());
-                    RedrawCanvas();
-                }
-            };
-            btnRedo.Click += (s, e) =>
-            {
-                if (_redoStack.Count > 0)
-                {
-                    _undoStack.Push(_redoStack.Pop());
-                    RedrawCanvas();
-                }
-            };
-
-            // Import - Export Background
-
+            
             btnImportBg.Click += (s, e) =>
             {
                 using (OpenFileDialog openFileDialog = new OpenFileDialog())
@@ -209,8 +186,6 @@ namespace CanvasApp.Client
             if (_graphics != null)
             {
                 _graphics.Clear(Color.White);
-                _undoStack.Clear(); // Xóa lịch sử undo khi clear bảng
-                _redoStack.Clear();
                 canvasPanel.Invalidate();
             }
         }
@@ -312,11 +287,6 @@ namespace CanvasApp.Client
                                 Points = new List<Common.PointF> { ScreenToCanvas(e.X, e.Y) }
                             };
                             DrawActionLocal(textAction);
-
-                            _undoStack.Push(textAction);
-                            _redoStack.Clear();
-
-
                             canvasPanel.Invalidate();
                             await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_SHAPE, textAction);
                         }
@@ -367,7 +337,6 @@ namespace CanvasApp.Client
 
             if (IsShapeTool(_currentTool))
             {
-                _currentPoint = current; // Cập nhật để vẽ pre-view shape
                 canvasPanel.Invalidate();
             }
             else
@@ -412,16 +381,8 @@ namespace CanvasApp.Client
                 {
                     await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_END, _currentStroke);
                 }
-
-                // Cập nhật Undo Stack (Fix lỗi logic gốc)
-                if (_currentStroke.Points.Count > 0)
-                {
-                    _undoStack.Push(_currentStroke);
-                    _redoStack.Clear();
-                }
-
-                _currentStroke = null;
             }
+            _currentStroke = null;
         }
 
         //Handling scroll events
@@ -510,7 +471,6 @@ namespace CanvasApp.Client
                             foreach (var m in hist.Messages)
                                 AppendChatMessage(m.Username, m.Text);
                         break;
-
 
                     case MessageType.ROOM_UPDATE:
                         // ── Strongly-typed parse ────────────────────────
@@ -634,32 +594,8 @@ namespace CanvasApp.Client
             CanvasClient.Instance.OnMessageReceived -= OnServerMessage;
             base.OnFormClosed(e);
         }
-        // ── Undo & Redo Logic ───────────────────────────────────────────
-        private void RedrawCanvas()
-        {
-            _graphics.Clear(Color.Transparent); // Đổi thành Transparent để không đè lên Background Image
-            foreach (var action in _undoStack.Reverse())
-            {
-                DrawActionLocal(action);
-            }
-            canvasPanel.Invalidate();
-        }
 
-        private void CanvasForm_KeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.Control && e.KeyCode == Keys.Z)
-            {
-                btnUndo.PerformClick();
-                e.SuppressKeyPress = true;
-            }
-            else if (e.Control && e.KeyCode == Keys.Y)
-            {
-                btnRedo.PerformClick();
-                e.SuppressKeyPress = true;
-            }
-        }
-
-        // ── Shape & Brush Utilities ─────────────────────────────────────
+        //Shape 
         private bool IsShapeTool(string tool)
         {
             return tool == "rectangle" || tool == "circle" || tool == "line" || tool == "arrow";
@@ -671,11 +607,6 @@ namespace CanvasApp.Client
             {
                 _thickness = newSize;
             }
-        }
-
-        private void btnUndo_Click(object sender, EventArgs e)
-        {
-
         }
     }
 }

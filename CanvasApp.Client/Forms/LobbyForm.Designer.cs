@@ -27,15 +27,10 @@ namespace CanvasApp.Client
             this.pictureBox1 = new System.Windows.Forms.PictureBox();
             this.label1 = new System.Windows.Forms.Label();
             this.btnCreateShow = new Guna.UI2.WinForms.Guna2Button();
-            this.guna2Panel1 = new Guna.UI2.WinForms.Guna2Panel();
-            this.txtMessage = new Guna.UI2.WinForms.Guna2TextBox();
-            this.rtxtMessage = new System.Windows.Forms.RichTextBox();
-            this.lblTitle = new System.Windows.Forms.Label();
             this.flowLayoutPanel1 = new System.Windows.Forms.FlowLayoutPanel();
             this.pnlTopBar.SuspendLayout();
             this.panel1.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)(this.pictureBox1)).BeginInit();
-            this.guna2Panel1.SuspendLayout();
             this.SuspendLayout();
             // 
             // pnlTopBar
@@ -141,69 +136,12 @@ namespace CanvasApp.Client
             this.btnCreateShow.Text = "+ Tạo bảng trắng mới";
             this.btnCreateShow.Click += new System.EventHandler(this.btnCreateShow_Click);
             // 
-            // guna2Panel1
-            // 
-            this.guna2Panel1.BackColor = System.Drawing.Color.Transparent;
-            this.guna2Panel1.BorderRadius = 30;
-            this.guna2Panel1.Controls.Add(this.txtMessage);
-            this.guna2Panel1.Controls.Add(this.rtxtMessage);
-            this.guna2Panel1.Controls.Add(this.lblTitle);
-            this.guna2Panel1.FillColor = System.Drawing.Color.White;
-            this.guna2Panel1.Font = new System.Drawing.Font("Montserrat", 10.8F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.guna2Panel1.Location = new System.Drawing.Point(627, 151);
-            this.guna2Panel1.Name = "guna2Panel1";
-            this.guna2Panel1.Size = new System.Drawing.Size(640, 740);
-            this.guna2Panel1.TabIndex = 5;
-            this.guna2Panel1.Paint += new System.Windows.Forms.PaintEventHandler(this.guna2Panel1_Paint);
-            // 
-            // txtMessage
-            // 
-            this.txtMessage.BorderRadius = 10;
-            this.txtMessage.Cursor = System.Windows.Forms.Cursors.IBeam;
-            this.txtMessage.DefaultText = "";
-            this.txtMessage.DisabledState.BorderColor = System.Drawing.Color.FromArgb(((int)(((byte)(208)))), ((int)(((byte)(208)))), ((int)(((byte)(208)))));
-            this.txtMessage.DisabledState.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(226)))), ((int)(((byte)(226)))), ((int)(((byte)(226)))));
-            this.txtMessage.DisabledState.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(138)))), ((int)(((byte)(138)))), ((int)(((byte)(138)))));
-            this.txtMessage.DisabledState.PlaceholderForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(138)))), ((int)(((byte)(138)))), ((int)(((byte)(138)))));
-            this.txtMessage.FocusedState.BorderColor = System.Drawing.Color.FromArgb(((int)(((byte)(94)))), ((int)(((byte)(148)))), ((int)(((byte)(255)))));
-            this.txtMessage.Font = new System.Drawing.Font("Segoe UI", 9F);
-            this.txtMessage.HoverState.BorderColor = System.Drawing.Color.FromArgb(((int)(((byte)(94)))), ((int)(((byte)(148)))), ((int)(((byte)(255)))));
-            this.txtMessage.Location = new System.Drawing.Point(32, 661);
-            this.txtMessage.Margin = new System.Windows.Forms.Padding(3, 4, 3, 4);
-            this.txtMessage.Name = "txtMessage";
-            this.txtMessage.PlaceholderText = "";
-            this.txtMessage.SelectedText = "";
-            this.txtMessage.Size = new System.Drawing.Size(575, 54);
-            this.txtMessage.TabIndex = 2;
-            // 
-            // rtxtMessage
-            // 
-            this.rtxtMessage.BackColor = System.Drawing.Color.WhiteSmoke;
-            this.rtxtMessage.BorderStyle = System.Windows.Forms.BorderStyle.None;
-            this.rtxtMessage.Location = new System.Drawing.Point(32, 67);
-            this.rtxtMessage.Name = "rtxtMessage";
-            this.rtxtMessage.ReadOnly = true;
-            this.rtxtMessage.Size = new System.Drawing.Size(575, 587);
-            this.rtxtMessage.TabIndex = 1;
-            this.rtxtMessage.Text = "";
-            // 
-            // lblTitle
-            // 
-            this.lblTitle.AutoSize = true;
-            this.lblTitle.Font = new System.Drawing.Font("Montserrat", 10.8F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.lblTitle.ForeColor = System.Drawing.Color.Black;
-            this.lblTitle.Location = new System.Drawing.Point(27, 24);
-            this.lblTitle.Name = "lblTitle";
-            this.lblTitle.Size = new System.Drawing.Size(218, 25);
-            this.lblTitle.TabIndex = 0;
-            this.lblTitle.Text = "Kênh thảo luận chung";
-            // 
             // flowLayoutPanel1
             // 
             this.flowLayoutPanel1.AutoScroll = true;
             this.flowLayoutPanel1.Location = new System.Drawing.Point(35, 235);
             this.flowLayoutPanel1.Name = "flowLayoutPanel1";
-            this.flowLayoutPanel1.Size = new System.Drawing.Size(534, 656);
+            this.flowLayoutPanel1.Size = new System.Drawing.Size(1232, 656);
             this.flowLayoutPanel1.TabIndex = 4;
             // 
             // LobbyForm
@@ -213,7 +151,6 @@ namespace CanvasApp.Client
             this.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(248)))), ((int)(((byte)(249)))), ((int)(((byte)(250)))));
             this.ClientSize = new System.Drawing.Size(1300, 930);
             this.Controls.Add(this.pnlTopBar);
-            this.Controls.Add(this.guna2Panel1);
             this.Controls.Add(this.flowLayoutPanel1);
             this.Controls.Add(this.btnCreateShow);
             this.Controls.Add(this.label1);
@@ -226,8 +163,6 @@ namespace CanvasApp.Client
             this.pnlTopBar.ResumeLayout(false);
             this.panel1.ResumeLayout(false);
             ((System.ComponentModel.ISupportInitialize)(this.pictureBox1)).EndInit();
-            this.guna2Panel1.ResumeLayout(false);
-            this.guna2Panel1.PerformLayout();
             this.ResumeLayout(false);
             this.PerformLayout();
 
@@ -244,10 +179,6 @@ namespace CanvasApp.Client
         private Guna.UI2.WinForms.Guna2Button btnLogout;
         private System.Windows.Forms.Label label1;
         private Guna.UI2.WinForms.Guna2Button btnCreateShow;
-        private Guna.UI2.WinForms.Guna2Panel guna2Panel1;
         private System.Windows.Forms.FlowLayoutPanel flowLayoutPanel1;
-        private System.Windows.Forms.Label lblTitle;
-        private Guna.UI2.WinForms.Guna2TextBox txtMessage;
-        private System.Windows.Forms.RichTextBox rtxtMessage;
     }
 }

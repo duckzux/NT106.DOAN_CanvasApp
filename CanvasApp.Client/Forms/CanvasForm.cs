@@ -50,6 +50,10 @@ namespace CanvasApp.Client
         private readonly Dictionary<string, (string FileName, byte[] Data)> _chatFiles =
             new Dictionary<string, (string, byte[])>();
 
+        // Smart shape recognition controller (Drawing/ subsystem)
+        private readonly Drawing.ShapeSuggestionController _suggest =
+            new Drawing.ShapeSuggestionController();
+
         public CanvasForm()
         {
             InitializeComponent();
@@ -240,6 +244,57 @@ namespace CanvasApp.Client
             };
 
             CanvasClient.Instance.OnMessageReceived += OnServerMessage;
+
+            // ── Smart shape recognition wiring ──────────────────────────
+            _suggest.CommitShape += async (shape, color, thickness) =>
+            {
+                var action = new DrawAction
+                {
+                    Type = shape.ToDrawActionType(),
+                    Color = ColorToHex(color),
+                    Thickness = thickness,
+                    Points = new List<Common.PointF>
+                    {
+                        new Common.PointF(shape.Start.X, shape.Start.Y),
+                        new Common.PointF(shape.End.X,   shape.End.Y)
+                    }
+                };
+                DrawActionLocal(action);
+                _undoStack.Push(action);
+                _redoStack.Clear();
+                canvasPanel.Invalidate();
+                await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_SHAPE, action);
+            };
+
+            _suggest.CommitFreehand += async (pts, color, thickness) =>
+            {
+                var action = new DrawAction
+                {
+                    Type = "pen",
+                    Color = ColorToHex(color),
+                    Thickness = thickness,
+                    Points = new List<Common.PointF>(pts.Count)
+                };
+                foreach (var p in pts) action.Points.Add(new Common.PointF(p.X, p.Y));
+                DrawActionLocal(action);
+                _undoStack.Push(action);
+                _redoStack.Clear();
+                canvasPanel.Invalidate();
+                await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_END, action);
+            };
+
+            // Ctrl+Shift+R bật/tắt chế độ tự động gợi ý hình
+            this.KeyDown += (s, e) =>
+            {
+                if (e.Control && e.Shift && e.KeyCode == Keys.R)
+                {
+                    _suggest.SmartShapeEnabled = !_suggest.SmartShapeEnabled;
+                    lblCoordinates.Text = _suggest.SmartShapeEnabled
+                        ? "Smart shape: ON"
+                        : "Smart shape: OFF";
+                    e.SuppressKeyPress = true;
+                }
+            };
         }
 
         public void SetRoom(JoinRoomResult joinRes, string password = "")
@@ -353,6 +408,10 @@ namespace CanvasApp.Client
                     }
                 }
             }
+
+            // Smart shape recognition: live polyline + suggestion overlay.
+            // Rendered after everything else so it appears on top.
+            _suggest.Render(e.Graphics, _zoom);
         }
 
         private void DrawShape(Graphics g, string type, Common.PointF p1, Common.PointF p2, string colorHex, int thickness)
@@ -563,6 +622,19 @@ namespace CanvasApp.Client
                 return;
             }
 
+            // Smart shape recognition intercept (pen tool only).
+            // The controller buffers points locally and only commits to the
+            // bitmap/network when the user accepts or rejects the suggestion.
+            if (_currentTool == "pen" && _suggest.SmartShapeEnabled)
+            {
+                var smartPt = ScreenToCanvas(e.X, e.Y);
+                _suggest.OnMouseDown(
+                    new System.Drawing.PointF(smartPt.X, smartPt.Y),
+                    _currentColor, _thickness);
+                canvasPanel.Invalidate();
+                return;
+            }
+
             _isDrawing = true;
             Common.PointF realPoint = ScreenToCanvas(e.X, e.Y);
             _lastPoint = realPoint;
@@ -597,6 +669,15 @@ namespace CanvasApp.Client
             }
 
             lblCoordinates.Text = $"X: {e.X}, Y: {e.Y}";
+
+            if (_suggest.IsDrawing)
+            {
+                var smartPt = ScreenToCanvas(e.X, e.Y);
+                _suggest.OnMouseMove(new System.Drawing.PointF(smartPt.X, smartPt.Y));
+                canvasPanel.Invalidate();
+                return;
+            }
+
             if (!_isDrawing || _currentStroke == null) return;
 
             var current = ScreenToCanvas(e.X, e.Y);
@@ -632,6 +713,14 @@ namespace CanvasApp.Client
             if (e.Button == MouseButtons.Middle)
             {
                 _isPanning = false;
+                return;
+            }
+
+            if (_suggest.IsDrawing)
+            {
+                var smartPt = ScreenToCanvas(e.X, e.Y);
+                _suggest.OnMouseUp(new System.Drawing.PointF(smartPt.X, smartPt.Y), _zoom);
+                canvasPanel.Invalidate();
                 return;
             }
 
@@ -1095,6 +1184,25 @@ namespace CanvasApp.Client
                     e.SuppressKeyPress = true;
                 }
                 return; // block Ctrl+Z / Ctrl+Y while typing
+            }
+
+            // Smart shape suggestion: Enter accepts, Esc rejects.
+            if (_suggest.HasPendingSuggestion)
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    _suggest.AcceptSuggestion();
+                    canvasPanel.Invalidate();
+                    e.SuppressKeyPress = true;
+                    return;
+                }
+                if (e.KeyCode == Keys.Escape)
+                {
+                    _suggest.RejectSuggestion();
+                    canvasPanel.Invalidate();
+                    e.SuppressKeyPress = true;
+                    return;
+                }
             }
 
             if (e.Control && e.KeyCode == Keys.Z)

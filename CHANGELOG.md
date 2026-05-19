@@ -1,4 +1,85 @@
 
+# [2026-05-19] Feature — Smart Shape Recognition (Gợi ý hoàn thiện nét vẽ)
+
+Hoàn thành mục **8 — Gợi ý hoàn thiện nét vẽ** trong REMAINING TASKS. Sau khi user vẽ bằng Pen, hệ thống tự nhận diện hình thô (Line / Rectangle / Circle / Ellipse) và gợi ý phiên bản sạch dưới dạng overlay bán trong suốt; user nhấn `Enter` để chấp nhận, `Esc` để từ chối, hoặc click trực tiếp nút **Accept / Reject** cạnh hình.
+
+## CanvasApp.Client — Drawing subsystem (mới hoàn toàn)
+
+Tách logic nhận diện thành module độc lập trong thư mục `Drawing/` (trước đây trống, chỉ có `<Folder>` entry trong csproj). Toàn bộ subsystem không có dependency vào WinForms ngoài `System.Drawing` — có thể unit-test riêng.
+
+| File | Thay đổi |
+|------|----------|
+| `Drawing/Shapes/ShapeType.cs` | **File mới** — enum `ShapeType { Unknown, Line, Rectangle, Circle, Ellipse }` |
+| `Drawing/Shapes/RecognizedShape.cs` | **File mới** — class data thuần chứa geometry sạch (Start/End/Center/Radius/Bounds); factory `Line()`, `Rectangle()`, `Circle()`, `Ellipse()`; method `ToDrawActionType()` map về string type của `DrawAction` hiện có (`"line"`, `"rectangle"`, `"circle"`) |
+| `Drawing/Recognition/RecognitionConfig.cs` | **File mới** — gom toàn bộ magic number: `MinStrokeLength=30`, `MinPointCount=8`, `MinConfidence=0.75`, `ClosednessThreshold=0.20`, `RectAngleTolerance=15°`, `RdpEpsilonRatio=0.05`, `CircleRadiusVariance=0.18`, `CircleAspectTolerance=0.20`, `EllipseResidualThreshold=0.25`, `SmoothingPasses=2`, `MinPointSpacing=1.5` |
+| `Drawing/Recognition/RecognitionResult.cs` | **File mới** — `{ ShapeType, Confidence (0..1), RecognizedShape }`; singleton `None`; property `IsMatch` |
+| `Drawing/Recognition/StrokeAnalysis.cs` | **File mới** — helper geometry thuần (no state): `Distance`, `Perimeter`, `BoundingBox`, `Centroid`, `Closedness` (dist endpoint / perimeter), `PerpendicularDistance` (point đến infinite line), `Simplify` (Ramer-Douglas-Peucker recursive), `AngleAt` (interior angle qua 3 điểm, degrees), `Smooth` (Chaikin corner-cutting N passes) |
+| `Drawing/Recognition/IShapeDetector.cs` | **File mới** — interface 1-method `Detect(stroke, config) → RecognitionResult`; detectors phải stateless, thread-safe |
+| `Drawing/Recognition/LineDetector.cs` | **File mới** — đo độ lệch perpendicular trung bình từng điểm đến chord giữa first/last point; chuẩn hóa theo chord length; `confidence = 1 − normalizedDev/0.15`; nhân 0.5 nếu stroke đóng (giảm false positive khi user vẽ vòng tròn rồi khép lại) |
+| `Drawing/Recognition/RectangleDetector.cs` | **File mới** — yêu cầu stroke đóng (Closedness < threshold), RDP simplify với epsilon = diag × 0.05, drop closing duplicate vertex, collapse edge ngắn nhất xuống còn 4 đỉnh nếu có 5-6, check 4 góc trong đó max deviation < 15° so với 90°; output = axis-aligned bounding box |
+| `Drawing/Recognition/CircleDetector.cs` | **File mới** — yêu cầu stroke đóng + aspect ratio bbox trong ±20% (chống false-positive khi user vẽ ellipse dài); center = bbox center (không phải centroid — centroid bias do điểm tụ ở vùng vẽ chậm); coefficient of variation CV = σ(r)/mean(r), match nếu CV < 0.18 |
+| `Drawing/Recognition/EllipseDetector.cs` | **File mới** — yêu cầu stroke đóng, fit axis-aligned ellipse từ bbox, tính residual `\|((x−cx)/a)² + ((y−cy)/b)² − 1\|` cho từng point; mean residual < 0.25 → match |
+| `Drawing/Recognition/ShapeRecognizer.cs` | **File mới** — orchestrator: smooth stroke 2 lần qua Chaikin trước khi phân tích (giảm jitter mà không bo tròn corner), chạy tất cả `IShapeDetector` đã đăng ký, pick highest confidence; reject nếu < `MinConfidence`; method `AddDetector()` để mở rộng |
+| `Drawing/StrokeCollector.cs` | **File mới** — buffer point trong canvas space với spatial decimation: chỉ accept point cách last point > `MinPointSpacing` (1.5 canvas units) → giới hạn point count cho recognition (~200 points cho stroke rất dài); methods `Begin/Add/EndAndTake/Cancel`, property `IsActive/Points/Count` |
+| `Drawing/Rendering/ShapeRenderer.cs` | **File mới** — static, vẽ `RecognizedShape` lên bất kỳ `Graphics` nào với `Pen` round cap/join (khớp với `DrawShape` hiện có trong `CanvasForm`); method `DrawPolyline()` vẽ raw stroke cho ghost preview |
+| `Drawing/SuggestionOverlay.cs` | **File mới** — visual layer: vẽ ghost stroke alpha=90 (giữ nguyên nét gốc theo spec), hình sạch alpha=255 (đậm hơn để báo hiệu suggestion), 2 nút Accept (xanh `#388E3C`) / Reject (đỏ `#C62828`) bo góc dưới bbox; button kích thước scale theo `1/zoom` để pixel size không đổi trên màn hình; method `HitTest(canvasPos, out accept)` cho phép controller phân biệt click vào button vs canvas |
+| `Drawing/ShapeSuggestionController.cs` | **File mới** — facade duy nhất CanvasForm cần biết: events `CommitShape (shape, color, thickness)` và `CommitFreehand (points, color, thickness)`; property `SmartShapeEnabled` (default `true`), `IsDrawing`, `HasPendingSuggestion`; methods `OnMouseDown/Move/Up`, `AcceptSuggestion`, `RejectSuggestion`, `CancelStroke`, `Render(g, zoom)`; tự xử lý click overlay button (gọi Accept/Reject), click ngoài button khi có suggestion → auto-Reject + start stroke mới (giống Excalidraw) |
+| `CanvasApp.Client.csproj` | Thay `<Folder Include="Drawing\" />` bằng 15 `<Compile>` entry cho subsystem mới |
+
+## CanvasApp.Client — UI integration
+
+| File | Thay đổi |
+|------|----------|
+| `Forms/CanvasForm.cs` | Thêm field `private readonly Drawing.ShapeSuggestionController _suggest = new Drawing.ShapeSuggestionController()` |
+| `Forms/CanvasForm.cs` | Constructor: wire `_suggest.CommitShape` → tạo `DrawAction` với type từ `shape.ToDrawActionType()` + 2 endpoint points, gọi `DrawActionLocal`, push undo stack, broadcast `MessageType.DRAW_SHAPE` (clean shape) |
+| `Forms/CanvasForm.cs` | Constructor: wire `_suggest.CommitFreehand` → tạo `DrawAction` type `"pen"` với toàn bộ point list, push undo, broadcast `MessageType.DRAW_END` (batched — gửi 1 lần thay vì stream DRAW_MOVE) |
+| `Forms/CanvasForm.cs` | Constructor: thêm `KeyDown` lambda lắng nghe `Ctrl+Shift+R` → toggle `_suggest.SmartShapeEnabled`, hiển thị trạng thái lên `lblCoordinates` (`Smart shape: ON/OFF`) |
+| `Forms/CanvasForm.cs` | `Canvas_MouseDown`: intercept đầu method khi `_currentTool == "pen"` && `_suggest.SmartShapeEnabled` → gọi `_suggest.OnMouseDown(canvasPt, color, thickness)` + `return` (KHÔNG set `_isDrawing = true`, KHÔNG ghi bitmap, KHÔNG broadcast — point được buffer trong controller) |
+| `Forms/CanvasForm.cs` | `Canvas_MouseMove`: intercept khi `_suggest.IsDrawing` → gọi `_suggest.OnMouseMove(canvasPt)` + `Invalidate` (live polyline render qua `Render()` ở Paint event) |
+| `Forms/CanvasForm.cs` | `Canvas_MouseUp`: intercept khi `_suggest.IsDrawing` → gọi `_suggest.OnMouseUp(canvasPt, _zoom)` — controller chạy recognition và bật overlay nếu match, hoặc gọi `CommitFreehand` ngay nếu không match |
+| `Forms/CanvasForm.cs` | `CanvasPanel_Paint` cuối method (sau text edit block, trong scope của pan/zoom transform): `_suggest.Render(e.Graphics, _zoom)` — vẽ live polyline + suggestion overlay đúng coordinate space |
+| `Forms/CanvasForm.cs` | `CanvasForm_KeyDown` giữa text-edit block và Ctrl+Z block: nếu `_suggest.HasPendingSuggestion` thì `Enter` → `AcceptSuggestion()`, `Esc` → `RejectSuggestion()` + `SuppressKeyPress` |
+
+## Kiến trúc — quyết định quan trọng
+
+| Quyết định | Lý do |
+|-----------|-------|
+| Buffer point trong controller, KHÔNG broadcast realtime khi smart mode ON | Tránh phải mở rộng protocol thêm `DRAW_RETRACT` để xóa freehand đã broadcast khi user accept. Trade-off: client khác không thấy stroke realtime trong smart mode — chấp nhận được vì stroke ngắn (vài giây) |
+| Dùng `System.Drawing.PointF` (struct) trong subsystem, chỉ convert sang `Common.PointF` (class) ở boundary commit handler | Tránh allocate object cho mỗi point trong recognition hot path; `Common.PointF` là class có JsonProperty cho network serialization, không cần ở local math |
+| Circle thắng Ellipse khi cả hai match | Ellipse từ bbox luôn là superset của Circle (a ≈ b); pick Circle khi aspect ratio đủ gần 1 cho output sạch hơn |
+| Suggestion overlay render trong canvas space (đã apply pan/zoom transform) thay vì screen space | Scale tự động khớp với canvas; button border/text scale ngược (`1f/zoom`) để pixel size không đổi |
+| Recognition chạy trên smoothed stroke (Chaikin 2 passes), commit shape lại dùng smoothed endpoints | Smooth giúp loại jitter mà không thay đổi endpoint quá nhiều; commit dùng endpoint sau smooth để consistency với detection |
+
+## Algorithm — confidence scoring
+
+| Detector | Công thức | Threshold |
+|----------|-----------|-----------|
+| **Line** | `confidence = 1 − avgPerpDev / chord / 0.15`, nhân 0.5 nếu closed | Floor `0.0` |
+| **Rectangle** | `confidence = 1 − (maxCornerDev / 15°) × 0.5` | Reject nếu `maxCornerDev > 15°` hoặc số đỉnh sau RDP ∉ [4,6] |
+| **Circle** | `confidence = 1 − (CV / 0.18) × 0.6` với `CV = σ(r) / mean(r)` | Reject nếu `CV > 0.18` hoặc aspect ratio bbox ngoài `[1, 1.2]` |
+| **Ellipse** | `confidence = 1 − (meanResidual / 0.25) × 0.7` | Reject nếu `meanResidual > 0.25` |
+
+Global floor: `RecognitionConfig.MinConfidence = 0.75`.
+
+## UX
+
+| Tương tác | Hành vi |
+|-----------|---------|
+| Vẽ stroke với Pen (smart mode ON) | Live polyline hiển thị qua Paint event (chưa ghi bitmap, chưa broadcast) |
+| MouseUp, recognition match | Overlay hiện: ghost stroke alpha 35% + clean shape alpha 100% + 2 nút Accept/Reject |
+| MouseUp, recognition không match | Auto-commit freehand như Pen thường: ghi bitmap, push undo, broadcast `DRAW_END` |
+| `Enter` | Commit clean shape, broadcast `DRAW_SHAPE` |
+| `Esc` | Commit freehand, broadcast `DRAW_END` batched |
+| Click nút Accept / Reject | Tương đương `Enter` / `Esc` |
+| Click ra ngoài button khi có suggestion | Auto-reject suggestion cũ + start stroke mới (giống Excalidraw / Figma) |
+| `Ctrl+Shift+R` | Toggle `SmartShapeEnabled`; trạng thái hiện ở `lblCoordinates` |
+
+## REMAINING TASKS — đã hoàn thành
+
+- [x] **Item 8: Gợi ý hoàn thiện nét vẽ** (Smart Shape Recognition) — Line, Rectangle, Circle, Ellipse
+
+---
+
 # [2026-05-19] Fix — Canvas Không Giới Hạn Vùng Vẽ + Sửa Nút Chat
 
 ## CanvasApp.Client
@@ -357,6 +438,6 @@ Done Foundation, giờ cần logic đồ họa và các tính năng sáng tạo:
      > Kim Quyen
 7. **Load Balancer**
      > Kim Quyen
-8. **Gợi ý hoàn thiện nét vẽ** (Kiểu vẽ hơi méo tự động gợi ý fix lại tròn,...)
+8. ~~**Gợi ý hoàn thiện nét vẽ**~~ ✅ **DONE** (2026-05-19) — Smart Shape Recognition cho Line/Rectangle/Circle/Ellipse với overlay Accept/Reject. Xem entry `[2026-05-19] Feature — Smart Shape Recognition` ở đầu file.
 9.  Xác thực email (kiểu check email real hay fake hoặc thêm cái dạng xác thực OTP qua mail càng tốt)
       > Kim Quyen

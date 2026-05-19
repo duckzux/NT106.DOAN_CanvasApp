@@ -196,7 +196,7 @@ namespace CanvasApp.Client
             this.btnAttachFile.DisabledState.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(169)))), ((int)(((byte)(169)))), ((int)(((byte)(169)))));
             this.btnAttachFile.DisabledState.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(141)))), ((int)(((byte)(141)))), ((int)(((byte)(141)))));
             this.btnAttachFile.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(172)))), ((int)(((byte)(139)))), ((int)(((byte)(238)))));
-            this.btnAttachFile.Font = new System.Drawing.Font("Segoe UI", 8F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.btnAttachFile.Font = new System.Drawing.Font("Segoe UI", 6F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.btnAttachFile.ForeColor = System.Drawing.Color.WhiteSmoke;
             this.btnAttachFile.Location = new System.Drawing.Point(6, 696);
             this.btnAttachFile.Name = "btnAttachFile";

@@ -185,7 +185,21 @@
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>
-    <Folder Include="Drawing\" />
+    <Compile Include="Drawing\Shapes\ShapeType.cs" />
+    <Compile Include="Drawing\Shapes\RecognizedShape.cs" />
+    <Compile Include="Drawing\Recognition\RecognitionConfig.cs" />
+    <Compile Include="Drawing\Recognition\RecognitionResult.cs" />
+    <Compile Include="Drawing\Recognition\StrokeAnalysis.cs" />
+    <Compile Include="Drawing\Recognition\IShapeDetector.cs" />
+    <Compile Include="Drawing\Recognition\LineDetector.cs" />
+    <Compile Include="Drawing\Recognition\RectangleDetector.cs" />
+    <Compile Include="Drawing\Recognition\CircleDetector.cs" />
+    <Compile Include="Drawing\Recognition\EllipseDetector.cs" />
+    <Compile Include="Drawing\Recognition\ShapeRecognizer.cs" />
+    <Compile Include="Drawing\Rendering\ShapeRenderer.cs" />
+    <Compile Include="Drawing\StrokeCollector.cs" />
+    <Compile Include="Drawing\SuggestionOverlay.cs" />
+    <Compile Include="Drawing\ShapeSuggestionController.cs" />
     <Folder Include="Resources\Icons\" />
   </ItemGroup>
   <ItemGroup>

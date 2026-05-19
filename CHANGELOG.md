@@ -1,4 +1,73 @@
 
+# [2026-05-19] Feature — Load Balancer (Cân bằng tải Auth + Canvas, room-affinity routing)
+
+Hoàn thành mục **7 — Load Balancer** trong REMAINING TASKS. Module `CanvasApp.LoadBalancer` là một **TCP proxy lai L4/L7** đứng giữa Client và 2 pool backend (Auth Server + Canvas Server). Listen port `9000` — Client chỉ cần biết duy nhất port này, không bao giờ kết nối thẳng `9001/9002/...`. So với bản layer-4 đầu, bản này bổ sung **5 hạng mục thiếu**: tách 2 pool Auth/Canvas, peek message JSON đầu, room-affinity routing table (`ConcurrentDictionary<roomId, ServerInfo>`), `RoomCount` tracking với ref-count tự dọn, health check 3-strike `FailCount` thay vì 1-shot bool.
+
+## Kiến trúc routing
+
+LB **peek dòng JSON đầu tiên** từ Client (đọc byte-by-byte qua `NetworkStream`, không qua `StreamReader` để không nuốt buffer thừa), parse `Message.Type`, rồi quyết định backend:
+
+| Loại message đầu | Pool | Chiến lược |
+|---|---|---|
+| `AUTH_LOGIN` / `AUTH_REGISTER` | **Auth** | Round-robin trong số Auth Server đang Up |
+| `ROOM_JOIN` (có `RoomId`) | **Canvas** | **Room-affinity**: tra `ConcurrentDictionary<RoomId, ServerInfo>`. Hit → reuse server cũ. Miss → chọn least-loaded + ghi mapping mới + `IncrementRoomCount()` |
+| `ROOM_LIST` / `ROOM_CREATE` / `ROOM_JOIN_BY_CODE` / `PING` / malformed | **Canvas** | Least-loaded (sort theo `RoomCount` → tiebreak `ActiveConnections` → round-robin) |
+
+Sau khi chọn backend, LB mở connection ngược lên, **forward chính dòng đã peek** (không drop), rồi spawn 2 task `PumpAsync` shuttle bytes 2 chiều. OS socket buffer giữ nguyên các byte sau `\n` đầu — `PumpAsync` đọc tiếp bình thường, không mất data.
+
+## File breakdown
+
+| File | Vai trò |
+|------|---------|
+| `ServerInfo.cs` | `enum ServerType { Auth, Canvas }`. Counters Interlocked: `ActiveConnections`, `RoomCount`, `FailCount`. `IsHealthy => FailCount < 3` (3-strike). `TryAcquireConnection/ReleaseConnection`, `IncrementRoomCount/DecrementRoomCount`, `ResetFailCount/IncrementFailCount`. Thread-safe để pump task + health checker đụng vào song song. |
+| `HealthChecker.cs` | Probe TCP-connect định kỳ 5s, timeout 2s. **3-strike logic**: probe success → `ResetFailCount()`; nếu trước đó Down → log `UP (recovered)`. Probe fail → `IncrementFailCount()`; chỉ log `DOWN` khi vừa chạm threshold 3, kèm progress `probe N/3 failed` cho mỗi miss trung gian. |
+| `LoadBalancer.cs` | `TcpListener` port 9000. 2 pool `_authPool` / `_canvasPool` tách từ `ServerType`. `ConcurrentDictionary<roomId, ServerInfo>` + `ConcurrentDictionary<roomId, int>` cho ref counting. `PickAuth()` round-robin. `PickCanvasLeastLoaded()` ưu tiên `RoomCount` thấp → tiebreak `ActiveConnections` → round-robin. `RouteForRoom(roomId)` reuse mapping cũ nếu server vẫn UP, ngược lại pick mới + tăng `RoomCount`. Khi connection cuối của room đóng → remove khỏi table + `DecrementRoomCount()`. `ReadOneLineAsync()` đọc byte-by-byte với deadline timeout. |
+| `Program.cs` | Đọc config qua Newtonsoft.Json, dựng dual pool, start HealthChecker + LoadBalancer, log `[POOL]` snapshot mỗi 15s với cả `conns`/`rooms`/`fails`, Ctrl+C graceful. |
+| `appsettings.json` | Tách `AuthServers[]` và `CanvasServers[]` (trước đây gộp 1 mảng). Thêm `PeekTimeoutMs`, `PeekMaxBytes`. Copy-to-output đã wired. |
+
+## Demo cho phần Load Balancing (1đ trong rubric)
+
+Để được trọn 1 điểm cần demo các bước:
+
+1. **Khởi động pool đầy đủ**: Mở 5 console:
+   - 2× `CanvasApp.AuthServer.exe` (`App.config` chỉnh port `9001` và `9011`)
+   - 2× `CanvasApp.Server.exe` (`App.config` chỉnh port `9002` và `9003`)
+   - 1× `CanvasApp.LoadBalancer.exe` — banner hiện `Auth pool: 2 backend(s)` và `Canvas pool: 2 backend(s)`.
+
+2. **Xác minh Health Check**: ≤5s sau, các backend đều `UP`. Mỗi 15s in `[POOL]` snapshot với cả `rooms=X fails=Y`.
+
+3. **Auth routing round-robin + failover**: Client A login → LB log `[LB] ... -> Auth 127.0.0.1:9001 (first=AUTH_LOGIN)`. Client B login → `... -> Auth 127.0.0.1:9011`. Tắt AuthServer `9001` → sau ≤15s (3×5s) log `[HEALTH] ... -> DOWN`. Client login tiếp → LB tự đẩy hết về `9011` (failover).
+
+4. **Room-affinity routing**: Trong `Session.cs` đổi `CANVAS_PORT = 9000`. Client A connect, **first action là Join-by-Code với invite code của ROOM-14** (không vào lobby trước, để LB nhìn thấy `ROOM_JOIN` ngay từ đầu):
+   ```
+   [ROUTE] room ROOM-14 -> 127.0.0.1:9002 (rooms=1)
+   [LB] ... -> Canvas 127.0.0.1:9002 [UP] conns=1 rooms=1 fails=0 (first=ROOM_JOIN)
+   ```
+   Client B từ máy khác cũng Join-by-Code `ROOM-14`:
+   ```
+   [LB] ... -> Canvas 127.0.0.1:9002 [UP] conns=2 rooms=1 fails=0 (first=ROOM_JOIN)
+   ```
+   → Cả 2 cùng route về `9002` vì routing table đã có mapping → **canvas đồng bộ** giữa A và B. Client C join `ROOM-OTHER` (chưa tồn tại trong table) → LB chọn `9003` (`RoomCount=0` < `9002.RoomCount=1`) → log `[ROUTE] room ROOM-OTHER -> 127.0.0.1:9003`.
+
+5. **Health Check 3-strike**: Kill Canvas Server `9002` (Ctrl+C). Console LB log lần lượt:
+   ```
+   [HEALTH] Canvas 127.0.0.1:9002 probe 1/3 failed (...)
+   [HEALTH] Canvas 127.0.0.1:9002 probe 2/3 failed (...)
+   [HEALTH] Canvas 127.0.0.1:9002 -> DOWN (3 fails: ...)
+   ```
+   Sau ≤15s, tạo room mới → toàn bộ về `9003`. Bật lại `9002` → ≤5s sau log `UP (recovered)`.
+
+6. **Room cleanup**: Khi connection cuối của 1 room đóng → log `[ROUTE] room ROOM-14 freed from 127.0.0.1:9002 (rooms=0)`. Routing table tự dọn, không leak.
+
+7. **MaxConnections cap (tùy chọn)**: Sửa `appsettings.json` → `MaxConnections: 2`. Client thứ 3 cùng pool sẽ bị reject (`rejected — ... at MaxConnections`).
+
+## Giới hạn đã biết
+
+- **Room-affinity chỉ áp dụng khi first message = `ROOM_JOIN`**: nếu Client mở connection rồi gửi `ROOM_LIST` trước (lobby flow chuẩn), LB không thấy RoomId — connection bị bind vào Canvas Server bất kỳ. Sau đó `ROOM_JOIN` qua cùng connection sẽ luôn đi về server đó, có thể không phải nơi room thật sự tồn tại. **Workaround cho demo**: dùng Join-by-Code / paste invite link để LB peek `ROOM_JOIN` ngay từ đầu.
+- **LB không theo dõi `ROOM_LEAVE` mid-connection**: ref-count tính theo "connection alive" không theo trạng thái room ở Server. Nếu 1 client `ROOM_LEAVE` mà giữ connection để vào lobby → LB vẫn count là 1 ref cho room cũ đến khi connection đóng. Vô hại nhưng `RoomCount` có thể over-estimate nhẹ.
+- **LB không peek `ROOM_CREATE` response**: roomId mới chỉ được biết tới khi có connection sau đó `ROOM_JOIN` vào — tại thời điểm đó LB phải pick lại server (có thể trùng hoặc không trùng nơi room đang tồn tại). Lý tưởng: parse `ROOM_CREATE_RESULT` từ chiều backend→client để học mapping. Chưa làm vì cần Layer-7 inspection 2 chiều, tăng độ phức tạp lên đáng kể.
+
+
 # [2026-05-19] Feature — Smart Shape Recognition (Gợi ý hoàn thiện nét vẽ)
 
 Hoàn thành mục **8 — Gợi ý hoàn thiện nét vẽ** trong REMAINING TASKS. Sau khi user vẽ bằng Pen, hệ thống tự nhận diện hình thô (Line / Rectangle / Circle / Ellipse) và gợi ý phiên bản sạch dưới dạng overlay bán trong suốt; user nhấn `Enter` để chấp nhận, `Esc` để từ chối, hoặc click trực tiếp nút **Accept / Reject** cạnh hình.
@@ -436,7 +505,7 @@ Done Foundation, giờ cần logic đồ họa và các tính năng sáng tạo:
    - Quản lý giao diện phông nền theo dạng Template (Dotted, Lined, Grid).
 6. **Share link room**
      > Kim Quyen
-7. **Load Balancer**
+7. ~~**Load Balancer**~~ ✅ **DONE** (2026-05-19) — TCP layer-4 proxy port 9000, Least-Connections + Health Check 5s, multi Canvas Server. Xem entry `[2026-05-19] Feature — Load Balancer` ở đầu file.
      > Kim Quyen
 8. ~~**Gợi ý hoàn thiện nét vẽ**~~ ✅ **DONE** (2026-05-19) — Smart Shape Recognition cho Line/Rectangle/Circle/Ellipse với overlay Accept/Reject. Xem entry `[2026-05-19] Feature — Smart Shape Recognition` ở đầu file.
 9.  Xác thực email (kiểu check email real hay fake hoặc thêm cái dạng xác thực OTP qua mail càng tốt)

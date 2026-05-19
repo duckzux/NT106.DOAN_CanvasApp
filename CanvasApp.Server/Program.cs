@@ -9,12 +9,13 @@ using System.Threading;
 using System.Threading.Tasks;
 using CanvasApp.Common;
 using CanvasApp.Common.DataAccess;
+using Newtonsoft.Json.Linq;
 
 namespace CanvasApp.Server
 {
     class Program
     {
-        private const int PORT = 9002;
+        private const int DefaultPort = 9002;
         private static RoomManager _roomManager;
         private static AutoSaveService _autoSave;
         private static DrawActionDAO _drawActionDao;
@@ -68,10 +69,26 @@ namespace CanvasApp.Server
                 _roomManager = new RoomManager();
             }
 
-            var listener = new TcpListener(IPAddress.Any, PORT);
+            // Resolution order: args[0] (e.g. `CanvasApp.Server.exe 9003`) → Config/appsettings.json → default.
+            // CLI arg ưu tiên hơn để dễ chạy nhiều instance từ Visual Studio
+            // (Project → Debug → Application arguments).
+            int port;
+            if (args != null && args.Length > 0 && int.TryParse(args[0], out var argPort))
+            {
+                port = argPort;
+                Console.WriteLine($"[CONFIG] Server port from CLI arg: {port}");
+            }
+            else
+            {
+                port = LoadServerPortOrDefault();
+            }
+
+            try { Console.Title = $"CanvasServer :{port}"; } catch { }
+
+            var listener = new TcpListener(IPAddress.Any, port);
             listener.Start();
             Console.WriteLine("╔══════════════════════════════════════╗");
-            Console.WriteLine($"║   CANVAS SERVER listening on :{PORT}    ║");
+            Console.WriteLine($"║   CANVAS SERVER listening on :{port}    ║");
             Console.WriteLine("╚══════════════════════════════════════╝");
 
             while (true)
@@ -79,6 +96,32 @@ namespace CanvasApp.Server
                 var tcp = await listener.AcceptTcpClientAsync();
                 _ = Task.Run(() => HandleClient(tcp));
             }
+        }
+
+        private static int LoadServerPortOrDefault()
+        {
+            try
+            {
+                var cfgPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Config", "appsettings.json");
+                if (!File.Exists(cfgPath)) cfgPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "appsettings.json");
+                if (!File.Exists(cfgPath)) return DefaultPort;
+
+                var json = File.ReadAllText(cfgPath);
+                var jo = JObject.Parse(json);
+                var token = jo.SelectToken("ServerSettings.Port");
+                if (token != null && token.Type == JTokenType.Integer)
+                {
+                    var port = token.Value<int>();
+                    Console.WriteLine($"[CONFIG] Server port loaded from {cfgPath}: {port}");
+                    return port;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[CONFIG] Failed to load port from appsettings.json: {ex.Message}");
+            }
+
+            return DefaultPort;
         }
 
         private static async Task HandleClient(TcpClient tcp)

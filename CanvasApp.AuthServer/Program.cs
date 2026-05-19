@@ -6,7 +6,7 @@ namespace CanvasApp.AuthServer
 {
     class Program
     {
-        private const int PORT = 9001;
+        private const int DefaultPort = 9001;
 
         static async Task Main(string[] args)
         {
@@ -18,6 +18,24 @@ namespace CanvasApp.AuthServer
                 Console.ReadKey();
                 return;
             }
+
+            // Resolution order: args[0] (e.g. `CanvasApp.AuthServer.exe 9011`) → App.config AuthPort → default.
+            // CLI arg ưu tiên hơn để dễ chạy nhiều instance từ Visual Studio (Project → Debug → Application arguments).
+            var port = DefaultPort;
+            if (args != null && args.Length > 0 && int.TryParse(args[0], out var argPort))
+            {
+                port = argPort;
+            }
+            else
+            {
+                var portSetting = ConfigurationManager.AppSettings["AuthPort"];
+                if (!string.IsNullOrWhiteSpace(portSetting) && int.TryParse(portSetting, out var parsedPort))
+                {
+                    port = parsedPort;
+                }
+            }
+
+            try { Console.Title = $"AuthServer :{port}"; } catch { }
 
             UserStore store;
             try
@@ -32,7 +50,7 @@ namespace CanvasApp.AuthServer
                 return;
             }
 
-            var server = new AuthServer(PORT, store);
+            var server = new AuthServer(port, store);
             await server.StartAsync();
         }
     }

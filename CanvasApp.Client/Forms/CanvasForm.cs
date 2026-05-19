@@ -31,9 +31,12 @@ namespace CanvasApp.Client
         private System.Drawing.PointF _panOffset = new System.Drawing.PointF(0, 0);
         private bool _isPanning = false;
         private System.Drawing.PointF _lastMousePos;
+        private int _canvasOffsetX;
+        private int _canvasOffsetY;
 
         private Room _room;
         private string _roomPassword;
+        private string _template = "Blank";
         private List<RoomMember> _initialMembers; // members lúc join (truyền từ LobbyForm)
 
         public CanvasForm()
@@ -107,20 +110,31 @@ namespace CanvasApp.Client
 
                     if (saveFileDialog.ShowDialog() == DialogResult.OK)
                     {
-                        Bitmap bmp = new Bitmap(canvasPanel.Width, canvasPanel.Height);
+                        // Tính bounding box của toàn bộ nội dung đã vẽ
+                        RectangleF bounds = GetContentBounds();
+                        int exportW = Math.Max((int)Math.Ceiling(bounds.Width), 1);
+                        int exportH = Math.Max((int)Math.Ceiling(bounds.Height), 1);
+                        int originX = (int)bounds.X;
+                        int originY = (int)bounds.Y;
+
+                        Bitmap bmp = new Bitmap(exportW, exportH);
 
                         using (Graphics g = Graphics.FromImage(bmp))
                         {
                             g.Clear(Color.White);
+                            DrawBackgroundTemplateForExport(g, exportW, exportH, originX, originY);
                             if (_bgImage != null)
                             {
-                                g.DrawImage(_bgImage, 0, 0, _bgImage.Width, _bgImage.Height);
+                                g.DrawImage(_bgImage, -originX, -originY, _bgImage.Width, _bgImage.Height);
                             }
                             if (_bitmap != null)
                             {
-                                g.DrawImage(_bitmap, 0, 0);
+                                // bitmap pixel (bx,by) = canvas (bx-_canvasOffsetX, by-_canvasOffsetY)
+                                // export pixel (0,0) = canvas (originX, originY)
+                                // → vẽ bitmap tại export (-_canvasOffsetX - originX, -_canvasOffsetY - originY)
+                                g.DrawImage(_bitmap, -_canvasOffsetX - originX, -_canvasOffsetY - originY);
                             }
-                        }    
+                        }
 
                         System.Drawing.Imaging.ImageFormat format = System.Drawing.Imaging.ImageFormat.Png;
 
@@ -197,6 +211,7 @@ namespace CanvasApp.Client
         {
             _room = joinRes.Room;
             _roomPassword = password;
+            _template = joinRes.Room?.Template ?? "Blank";
             _initialMembers = joinRes.Members ?? new List<RoomMember>();
             this.Load += (s, e) =>
             {
@@ -233,10 +248,15 @@ namespace CanvasApp.Client
         // ── Canvas init ─────────────────────────────────────────────────
         private void InitCanvas()
         {
-            _bitmap = new Bitmap(Math.Max(canvasPanel.Width, 100), Math.Max(canvasPanel.Height, 100));
+            // Bitmap gấp 4 lần panel để vẽ được ở vùng xung quanh khi thu nhỏ / kéo màn hình
+            _canvasOffsetX = Math.Max(canvasPanel.Width, 100) * 2;
+            _canvasOffsetY = Math.Max(canvasPanel.Height, 100) * 2;
+            _bitmap = new Bitmap(_canvasOffsetX * 2, _canvasOffsetY * 2);
             _graphics = Graphics.FromImage(_bitmap);
             _graphics.Clear(Color.Transparent);
             _graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            // Dịch gốc tọa độ canvas (0,0) vào giữa bitmap
+            _graphics.TranslateTransform(_canvasOffsetX, _canvasOffsetY);
             canvasPanel.Invalidate();
         }
 
@@ -244,8 +264,8 @@ namespace CanvasApp.Client
         {
             if (_graphics != null)
             {
-                _graphics.Clear(Color.White);
-                _undoStack.Clear(); // Xóa lịch sử undo khi clear bảng
+                _graphics.Clear(Color.Transparent);
+                _undoStack.Clear();
                 _redoStack.Clear();
                 canvasPanel.Invalidate();
             }
@@ -256,15 +276,17 @@ namespace CanvasApp.Client
             e.Graphics.TranslateTransform(_panOffset.X, _panOffset.Y);
             e.Graphics.ScaleTransform(_zoom, _zoom);
 
+            DrawBackgroundTemplate(e.Graphics);
+
             // Draw Background Image (từ nhánh feature/export-image)
             if (_bgImage != null)
             {
                 e.Graphics.DrawImage(_bgImage, 0, 0, _bgImage.Width, _bgImage.Height);
             }
 
-            if (_bitmap != null) 
+            if (_bitmap != null)
             {
-                e.Graphics.DrawImage(_bitmap, 0, 0);
+                e.Graphics.DrawImage(_bitmap, -_canvasOffsetX, -_canvasOffsetY);
             }
 
             // Draw active shape (từ nhánh dev)
@@ -308,6 +330,135 @@ namespace CanvasApp.Client
                     g.DrawLine(pen, p1.X, p1.Y, p2.X, p2.Y);
                 }
             }
+        }
+
+        private void DrawBackgroundTemplate(Graphics g)
+        {
+            int startX = (int)(-_panOffset.X / _zoom) - 50;
+            int startY = (int)(-_panOffset.Y / _zoom) - 50;
+            int w = (int)(canvasPanel.Width / _zoom) + 100;
+            int h = (int)(canvasPanel.Height / _zoom) + 100;
+
+            g.FillRectangle(Brushes.White, startX, startY, w, h);
+
+            if (_template == "Blank") return;
+
+            const int step = 30;
+            int xStart = (startX / step) * step;
+            int yStart = (startY / step) * step;
+            int xEnd = startX + w;
+            int yEnd = startY + h;
+
+            float lineWidth = Math.Max(0.3f, 1f / _zoom);
+
+            if (_template == "Dotted")
+            {
+                float dotR = Math.Max(1f, 1.5f / _zoom);
+                using (var brush = new SolidBrush(Color.FromArgb(180, 180, 200)))
+                    for (int x = xStart; x <= xEnd; x += step)
+                        for (int y = yStart; y <= yEnd; y += step)
+                            g.FillEllipse(brush, x - dotR, y - dotR, dotR * 2, dotR * 2);
+            }
+            else if (_template == "Lined")
+            {
+                using (var pen = new Pen(Color.FromArgb(200, 200, 210), lineWidth))
+                    for (int y = yStart; y <= yEnd; y += step)
+                        g.DrawLine(pen, startX, y, xEnd, y);
+            }
+            else if (_template == "Grid")
+            {
+                using (var pen = new Pen(Color.FromArgb(200, 200, 210), lineWidth))
+                {
+                    for (int x = xStart; x <= xEnd; x += step)
+                        g.DrawLine(pen, x, startY, x, yEnd);
+                    for (int y = yStart; y <= yEnd; y += step)
+                        g.DrawLine(pen, startX, y, xEnd, y);
+                }
+            }
+        }
+
+        // canvasOriginX/Y: toạ độ canvas tương ứng với pixel (0,0) của export bitmap
+        private void DrawBackgroundTemplateForExport(Graphics g, int width, int height, int canvasOriginX = 0, int canvasOriginY = 0)
+        {
+            if (_template == "Blank") return;
+
+            const int step = 30;
+            // Offset nội bộ để pattern align với canvas coordinates
+            int xOff = ((-canvasOriginX) % step + step) % step;
+            int yOff = ((-canvasOriginY) % step + step) % step;
+
+            if (_template == "Dotted")
+            {
+                float dotR = 1.5f;
+                using (var brush = new SolidBrush(Color.FromArgb(180, 180, 200)))
+                    for (int x = xOff; x <= width; x += step)
+                        for (int y = yOff; y <= height; y += step)
+                            g.FillEllipse(brush, x - dotR, y - dotR, dotR * 2, dotR * 2);
+            }
+            else if (_template == "Lined")
+            {
+                using (var pen = new Pen(Color.FromArgb(200, 200, 210), 1f))
+                    for (int y = yOff; y <= height; y += step)
+                        g.DrawLine(pen, 0, y, width, y);
+            }
+            else if (_template == "Grid")
+            {
+                using (var pen = new Pen(Color.FromArgb(200, 200, 210), 1f))
+                {
+                    for (int x = xOff; x <= width; x += step)
+                        g.DrawLine(pen, x, 0, x, height);
+                    for (int y = yOff; y <= height; y += step)
+                        g.DrawLine(pen, 0, y, width, y);
+                }
+            }
+        }
+
+        // Scan trực tiếp bitmap để tìm vùng có nét vẽ thực sự (kể cả remote users)
+        private RectangleF GetContentBounds()
+        {
+            const int padding = 8;
+
+            if (_bitmap == null)
+                return new RectangleF(0, 0, canvasPanel.Width, canvasPanel.Height);
+
+            int bw = _bitmap.Width, bh = _bitmap.Height;
+            var bmpData = _bitmap.LockBits(
+                new Rectangle(0, 0, bw, bh),
+                System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+
+            int stride = bmpData.Stride;
+            byte[] pixels = new byte[stride * bh];
+            System.Runtime.InteropServices.Marshal.Copy(bmpData.Scan0, pixels, 0, pixels.Length);
+            _bitmap.UnlockBits(bmpData);
+
+            int minBX = bw, maxBX = -1, minBY = bh, maxBY = -1;
+            for (int y = 0; y < bh; y++)
+            {
+                int rowBase = y * stride;
+                for (int x = 0; x < bw; x++)
+                {
+                    // Format32bppArgb byte order: B G R A
+                    if (pixels[rowBase + x * 4 + 3] > 0)
+                    {
+                        if (x < minBX) minBX = x;
+                        if (x > maxBX) maxBX = x;
+                        if (y < minBY) minBY = y;
+                        if (y > maxBY) maxBY = y;
+                    }
+                }
+            }
+
+            if (maxBX < 0) // Không có nội dung nào
+                return new RectangleF(0, 0, canvasPanel.Width, canvasPanel.Height);
+
+            // Chuyển từ bitmap pixel → canvas coordinates
+            // canvas = bitmap_pixel - _canvasOffset
+            float cx = minBX - _canvasOffsetX - padding;
+            float cy = minBY - _canvasOffsetY - padding;
+            float cw = (maxBX - minBX) + padding * 2;
+            float ch = (maxBY - minBY) + padding * 2;
+            return new RectangleF(cx, cy, cw, ch);
         }
 
         // ── Mouse drawing ───────────────────────────────────────────────
@@ -435,28 +586,32 @@ namespace CanvasApp.Client
             if (!_isDrawing) return;
             _isDrawing = false;
 
-            if (_currentStroke != null)
+            if (_currentStroke == null) return;
+
+            // Capture và clear ngay trước await để tránh race condition
+            var stroke = _currentStroke;
+            _currentStroke = null;
+
+            if (IsShapeTool(_currentTool))
             {
-                if (IsShapeTool(_currentTool))
+                stroke.Points.Add(_currentPoint);
+                if (stroke.Points.Count >= 2)
                 {
-                    _currentStroke.Points.Add(_currentPoint);
-                    DrawActionLocal(_currentStroke);
-
-                    await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_SHAPE, _currentStroke);
+                    DrawActionLocal(stroke);
+                    _undoStack.Push(stroke);
+                    _redoStack.Clear();
+                    canvasPanel.Invalidate();
+                    await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_SHAPE, stroke);
                 }
-                else
+            }
+            else
+            {
+                if (stroke.Points.Count > 0)
                 {
-                    await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_END, _currentStroke);
-                }
-
-                // Cập nhật Undo Stack (Fix lỗi logic gốc)
-                if (_currentStroke.Points.Count > 0)
-                {
-                    _undoStack.Push(_currentStroke);
+                    _undoStack.Push(stroke);
                     _redoStack.Clear();
                 }
-
-                _currentStroke = null;
+                await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_END, stroke);
             }
         }
 
@@ -468,7 +623,7 @@ namespace CanvasApp.Client
             if (e.Delta > 0) _zoom *= 1.1f;
             else _zoom /= 1.1f;
 
-            _zoom = Math.Max(0.1f, Math.Min(_zoom, 10f));
+            _zoom = Math.Max(0.25f, Math.Min(_zoom, 10f));
 
             _panOffset.X = e.X - (e.X - _panOffset.X) * (_zoom / oldZoom);
             _panOffset.Y = e.Y - (e.Y - _panOffset.Y) * (_zoom / oldZoom);
@@ -485,12 +640,14 @@ namespace CanvasApp.Client
         // ── Apply remote draw action ────────────────────────────────────
         private void DrawActionLocal(DrawAction action)
         {
+            if (action == null || action.Points == null || _graphics == null) return;
             if (action.Type.Contains("rectangle") || action.Type.Contains("circle") || action.Type.Contains("line") || action.Type.Contains("arrow"))
             {
+                if (action.Points.Count < 2) return;
                 DrawShape(_graphics, action.Type, action.Points[0], action.Points[1], action.Color, action.Thickness);
                 return;
             }
-            if (_graphics == null || action.Points == null || action.Points.Count < 2) return;
+            if (action.Points.Count < 2) return;
 
             if (action.Type.StartsWith("text:"))
             {

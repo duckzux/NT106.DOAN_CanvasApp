@@ -1,4 +1,54 @@
 
+# [2026-05-19] Canvas Drawing & Export — Bug Fixes & Virtual Canvas Expansion
+
+## CanvasApp.Client
+
+| File | Thay đổi |
+|------|----------|
+| `Forms/CanvasForm.cs` | Thêm fields `_canvasOffsetX`, `_canvasOffsetY`; `InitCanvas()` tạo bitmap **4× kích thước panel** và apply `TranslateTransform(_canvasOffsetX, _canvasOffsetY)` lên `_graphics` để gốc tọa độ canvas `(0,0)` nằm ở giữa bitmap; `CanvasPanel_Paint` render bitmap tại `(-_canvasOffsetX, -_canvasOffsetY)` thay vì `(0,0)`; zoom tối thiểu tăng từ `0.1` lên `0.25` |
+| `Forms/CanvasForm.cs` | `Canvas_MouseUp` refactor async: capture `_currentStroke` vào biến local `stroke` và gán `_currentStroke = null` **trước** `await SendDrawAsync` — loại bỏ race condition khi user vẽ nhanh; push undo stack và `Invalidate()` cũng thực hiện trước await |
+| `Forms/CanvasForm.cs` | `DrawActionLocal()`: thêm null/bounds guard cho shape actions — kiểm tra `action == null`, `action.Points == null`, `_graphics == null`, `Points.Count < 2` trước khi truy cập `Points[0]`/`Points[1]` |
+| `Forms/CanvasForm.cs` | Export: thêm `GetContentBounds()` scan trực tiếp pixel non-transparent trong `_bitmap` qua `LockBits` + `Marshal.Copy` để tính bounding box thực tế của toàn bộ nội dung (kể cả nét vẽ remote users không có trong `_undoStack`); export bitmap có kích thước khớp đúng vùng content |
+| `Forms/CanvasForm.cs` | `DrawBackgroundTemplateForExport()` thêm tham số `canvasOriginX/Y` để align dots/lines/grid đúng với canvas coordinates khi export vùng ngoài origin |
+| `Forms/CanvasForm.cs` | Thêm `DrawBackgroundTemplateForExport()` vào export handler — background template (dotted/grid/lined) được vẽ kèm theo ảnh xuất |
+
+## Bug Fixes
+
+| Bug | Fix |
+|-----|-----|
+| Vẽ ở vùng xung quanh khi thu nhỏ (zoom out) không lưu nét vẽ | Bitmap trước đây chỉ bằng đúng kích thước panel — tọa độ canvas vượt giới hạn bitmap bị GDI+ clip ngầm. Fix: bitmap 4× panel với origin offset ở giữa, bao phủ zoom đến 0.25× |
+| Shape cũ bị mất nét vẽ sau khi vẽ shape mới (async race condition) | `Canvas_MouseUp` là `async void` — sau `await`, `_currentStroke` có thể đã bị thay bởi stroke mới khiến undo stack push sai và stroke đang vẽ bị null hoá. Fix: capture local variable trước await |
+| Undo/Redo crash sau khi có shape không hợp lệ trong stack | `RedrawCanvas` gọi `_graphics.Clear()` rồi replay, nếu `DrawActionLocal` throw `IndexOutOfRangeException` (shape chỉ có 1 điểm do race condition) thì bitmap bị xóa trắng vĩnh viễn. Fix: guard `Points.Count < 2` |
+| Export chỉ capture vùng cố định ban đầu, bỏ sót nội dung zoom-out và remote users | Export dùng `_undoStack` để tính bounds — bỏ sót toàn bộ nét vẽ remote. Fix: scan pixel bitmap thực tế |
+| Background template (dotted/grid/lined) không xuất hiện trong ảnh export | Export không gọi `DrawBackgroundTemplateForExport`. Fix: thêm vào export handler |
+
+---
+
+# [2026-05-19] UI Fix & Feature — Room Header Labels + Copy Invite Code Button
+
+## CanvasApp.Client
+
+| File | Thay đổi |
+|------|----------|
+| `Forms/CanvasForm.Designer.cs` | `lblRoomName`: `AutoSize = false`, `Size = (230, 28)`, `TextAlign = MiddleCenter`; `lblRoomCode`: `AutoSize = false`, `Size = (198, 24)`, `Location = (10, 43)`, `TextAlign = MiddleCenter`; thêm `btnCopyCode` (Button, 24×24, FlatStyle, no border, hand cursor, image từ `CanvasForm.resx`) vào `pnlRight`; khai báo field `private System.Windows.Forms.Button btnCopyCode` |
+| `Forms/CanvasForm.resx` | Nhúng inline binary PNG (`btnCopyCode.Image`) của icon copy 64×64 dưới dạng `mimetype="application/x-microsoft.net.object.bytearray.base64"` thay vì `ResXFileRef` để tương thích MSBuild .NET Framework 4.8 |
+| `Forms/CanvasForm.cs` | Thêm field `private string _roomPassword`; đổi `SetRoom(JoinRoomResult)` → `SetRoom(JoinRoomResult, string password = "")`, gán `_roomPassword = password`; `lblRoomName.Text` hiện hiển thị `"Phòng vẽ: {name}"`; sau `InitializeComponent` scale icon copy xuống 15×15 (`new Bitmap(btnCopyCode.Image, 15, 15)`); handler `btnCopyCode.Click` copy clipboard theo định dạng `"Mã mời: {code}\nMật khẩu: {password}"` (dòng mật khẩu chỉ xuất hiện nếu phòng có mật khẩu); hiệu ứng flash xanh lá 700 ms sau khi copy |
+| `Forms/LobbyForm.cs` | Thêm field `private string _pendingPassword = ""`; gán `_pendingPassword` ở tất cả các nhánh join: `JoinRoom(card, password)`, `PromptJoinByCode()` (sau khi dialog OK), `ShowRequirePasswordForCode.OnSubmit`, `createRoom.OnRoomCreated` (cho creator auto-join); truyền `_pendingPassword` vào `canvas.SetRoom(res, _pendingPassword)` rồi reset về `""` |
+| `Properties/Resources.resx` | Thêm `ResXFileRef` entry cho `copy.png` và `copy1` (cả hai trỏ về `Resources\copy.png`) |
+| `Properties/Resources.Designer.cs` | VS tự sinh lại: thêm property `copy` và `copy1` kiểu `System.Drawing.Bitmap` |
+
+## Bug Fixes
+
+| Bug | Fix |
+|-----|-----|
+| `lblRoomName` chỉ hiển thị tên ngắn ("1", "2") thay vì "Phòng vẽ: 1" | Thêm prefix `"Phòng vẽ: "` khi gán `lblRoomName.Text` trong `SetRoom` |
+| Tên phòng và mã mời không căn giữa | `AutoSize = false` + `TextAlign = MiddleCenter` + kích thước cố định cho cả hai label |
+| Icon `btnCopyCode` không hiện (dùng `ResXFileRef` không hợp lệ với MSBuild .NET FW 4.8) | Nhúng PNG thành binary inline trong `CanvasForm.resx` với `mimetype` base64 |
+| Icon hiện nhưng trống (64×64 button nhỏ 24×24 clip phần giữa rỗng) | Scale ảnh xuống 15×15 sau `InitializeComponent` bằng `new Bitmap(img, 15, 15)` |
+| Mật khẩu không xuất hiện khi copy mã mời | `_pendingPassword` chưa được gán ở nhánh creator — thêm `_pendingPassword = pwd ?? ""` trong `createRoom.OnRoomCreated` |
+
+---
+
 # [2026-05-18] Bug Fixes & Feature Additions — Room Sync, Invite Codes, Chat Persistence, Architecture Hardening
 
 ## CanvasApp.Common — Models & Protocol

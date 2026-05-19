@@ -33,12 +33,18 @@ namespace CanvasApp.Client
         private System.Drawing.PointF _lastMousePos;
 
         private Room _room;
+        private string _roomPassword;
         private List<RoomMember> _initialMembers; // members lúc join (truyền từ LobbyForm)
 
         public CanvasForm()
         {
             InitializeComponent();
-            //Chống nhấp nháy màn hình khi vẽ 
+
+            // Scale copy icon (64×64) xuống vừa button 20×20
+            if (btnCopyCode.Image != null)
+                btnCopyCode.Image = new Bitmap(btnCopyCode.Image, 15, 15);
+
+            //Chống nhấp nháy màn hình khi vẽ
             typeof(Panel).InvokeMember("DoubleBuffered",
                 System.Reflection.BindingFlags.SetProperty |
                 System.Reflection.BindingFlags.Instance |
@@ -148,6 +154,22 @@ namespace CanvasApp.Client
                 if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await SendChat(); }
             };
 
+            // Copy invite code button
+            btnCopyCode.Click += (s, e) =>
+            {
+                var code = _room?.InviteCode ?? _room?.Id;
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"Mã mời: {code}");
+                if (!string.IsNullOrEmpty(_roomPassword))
+                    sb.AppendLine($"Mật khẩu: {_roomPassword}");
+                Clipboard.SetText(sb.ToString().TrimEnd());
+
+                var origColor = btnCopyCode.BackColor;
+                btnCopyCode.BackColor = Color.LightGreen;
+                System.Threading.Tasks.Task.Delay(700).ContinueWith(_ =>
+                    this.BeginInvoke((Action)(() => btnCopyCode.BackColor = origColor)));
+            };
+
             // Window controls
             ctrlClose.Click += async (s, e) =>
             {
@@ -158,13 +180,14 @@ namespace CanvasApp.Client
             CanvasClient.Instance.OnMessageReceived += OnServerMessage;
         }
 
-        public void SetRoom(JoinRoomResult joinRes)
+        public void SetRoom(JoinRoomResult joinRes, string password = "")
         {
             _room = joinRes.Room;
+            _roomPassword = password;
             _initialMembers = joinRes.Members ?? new List<RoomMember>();
             this.Load += (s, e) =>
             {
-                lblRoomName.Text = joinRes.Room.Name;
+                lblRoomName.Text = $"Phòng vẽ: {joinRes.Room.Name}";
                 // Show the invite code so users can share it
                 var code = joinRes.Room.InviteCode ?? joinRes.Room.Id;
                 lblRoomCode.Text = $"Mã mời: {code}";
@@ -674,6 +697,11 @@ namespace CanvasApp.Client
         }
 
         private void btnUndo_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void btnCopyCode_Click(object sender, EventArgs e)
         {
 
         }

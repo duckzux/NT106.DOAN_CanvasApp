@@ -42,6 +42,7 @@ namespace CanvasApp.Client
             this.txtMessageInput = new Guna.UI2.WinForms.Guna2TextBox();
             this.rtbChatHistory = new System.Windows.Forms.RichTextBox();
             this.pnlUserList = new Guna.UI2.WinForms.Guna2Panel();
+            this.btnCopyCode = new System.Windows.Forms.Button();
             this.lblRoomCode = new System.Windows.Forms.Label();
             this.lblRoomName = new System.Windows.Forms.Label();
             this.canvasPanel = new System.Windows.Forms.Panel();
@@ -80,8 +81,8 @@ namespace CanvasApp.Client
             this.chkFill = new System.Windows.Forms.ToolStripButton();
             this.toolStrip1 = new System.Windows.Forms.ToolStrip();
             this.tscbSize = new System.Windows.Forms.ToolStripComboBox();
-            this.colorDialog1 = new System.Windows.Forms.ColorDialog();
             this.btnImportBg = new System.Windows.Forms.ToolStripButton();
+            this.colorDialog1 = new System.Windows.Forms.ColorDialog();
             this.pnlHeader.SuspendLayout();
             this.pnlRight.SuspendLayout();
             this.canvasPanel.SuspendLayout();
@@ -153,6 +154,7 @@ namespace CanvasApp.Client
             this.pnlRight.Controls.Add(this.txtMessageInput);
             this.pnlRight.Controls.Add(this.rtbChatHistory);
             this.pnlRight.Controls.Add(this.pnlUserList);
+            this.pnlRight.Controls.Add(this.btnCopyCode);
             this.pnlRight.Controls.Add(this.lblRoomCode);
             this.pnlRight.Controls.Add(this.lblRoomName);
             this.pnlRight.Dock = System.Windows.Forms.DockStyle.Right;
@@ -225,27 +227,42 @@ namespace CanvasApp.Client
             this.pnlUserList.Size = new System.Drawing.Size(237, 175);
             this.pnlUserList.TabIndex = 1;
             // 
+            // btnCopyCode
+            // 
+            this.btnCopyCode.BackColor = System.Drawing.Color.Transparent;
+            this.btnCopyCode.Cursor = System.Windows.Forms.Cursors.Hand;
+            this.btnCopyCode.FlatAppearance.BorderSize = 0;
+            this.btnCopyCode.FlatAppearance.MouseOverBackColor = System.Drawing.Color.FromArgb(((int)(((byte)(220)))), ((int)(((byte)(220)))), ((int)(((byte)(255)))));
+            this.btnCopyCode.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+            this.btnCopyCode.Image = ((System.Drawing.Image)(resources.GetObject("btnCopyCode.Image")));
+            this.btnCopyCode.Location = new System.Drawing.Point(198, 41);
+            this.btnCopyCode.Name = "btnCopyCode";
+            this.btnCopyCode.Size = new System.Drawing.Size(39, 26);
+            this.btnCopyCode.TabIndex = 5;
+            this.btnCopyCode.UseVisualStyleBackColor = false;
+            this.btnCopyCode.Click += new System.EventHandler(this.btnCopyCode_Click);
+            // 
             // lblRoomCode
             // 
-            this.lblRoomCode.AutoSize = true;
             this.lblRoomCode.BackColor = System.Drawing.Color.Transparent;
             this.lblRoomCode.Font = new System.Drawing.Font("Microsoft Sans Serif", 10.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.lblRoomCode.Location = new System.Drawing.Point(75, 43);
+            this.lblRoomCode.Location = new System.Drawing.Point(10, 43);
             this.lblRoomCode.Name = "lblRoomCode";
-            this.lblRoomCode.Size = new System.Drawing.Size(115, 20);
+            this.lblRoomCode.Size = new System.Drawing.Size(198, 24);
             this.lblRoomCode.TabIndex = 1;
             this.lblRoomCode.Text = "Mã: ABC123X";
+            this.lblRoomCode.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
             // 
             // lblRoomName
             // 
-            this.lblRoomName.AutoSize = true;
             this.lblRoomName.BackColor = System.Drawing.Color.Transparent;
             this.lblRoomName.Font = new System.Drawing.Font("Microsoft Sans Serif", 12F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.lblRoomName.Location = new System.Drawing.Point(34, 10);
+            this.lblRoomName.Location = new System.Drawing.Point(10, 10);
             this.lblRoomName.Name = "lblRoomName";
-            this.lblRoomName.Size = new System.Drawing.Size(192, 25);
+            this.lblRoomName.Size = new System.Drawing.Size(230, 28);
             this.lblRoomName.TabIndex = 0;
-            this.lblRoomName.Text = "Phòng vẽ nhóm 14";
+            this.lblRoomName.Text = "Phòng vẽ: ID";
+            this.lblRoomName.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
             // 
             // canvasPanel
             // 
@@ -656,19 +673,18 @@ namespace CanvasApp.Client
             this.tscbSize.Text = " ⚫";
             this.tscbSize.TextChanged += new System.EventHandler(this.tscbSize_TextChanged);
             // 
+            // btnImportBg
+            // 
+            this.btnImportBg.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
+            this.btnImportBg.ImageTransparentColor = System.Drawing.Color.Magenta;
+            this.btnImportBg.Name = "btnImportBg";
+            this.btnImportBg.Size = new System.Drawing.Size(43, 4);
+            this.btnImportBg.Text = "toolStripButton1";
+            // 
             // colorDialog1
             // 
             this.colorDialog1.AnyColor = true;
             this.colorDialog1.FullOpen = true;
-            // 
-            // btnImportBg
-            // 
-            this.btnImportBg.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
-            this.btnImportBg.Image = ((System.Drawing.Image)(resources.GetObject("btnImportBg.Image")));
-            this.btnImportBg.ImageTransparentColor = System.Drawing.Color.Magenta;
-            this.btnImportBg.Name = "btnImportBg";
-            this.btnImportBg.Size = new System.Drawing.Size(43, 28);
-            this.btnImportBg.Text = "toolStripButton1";
             // 
             // CanvasForm
             // 
@@ -687,7 +703,6 @@ namespace CanvasApp.Client
             this.Text = "CanvasApp";
             this.pnlHeader.ResumeLayout(false);
             this.pnlRight.ResumeLayout(false);
-            this.pnlRight.PerformLayout();
             this.canvasPanel.ResumeLayout(false);
             this.canvasPanel.PerformLayout();
             this.pnlColorPalette.ResumeLayout(false);
@@ -754,5 +769,6 @@ namespace CanvasApp.Client
         private System.Windows.Forms.ColorDialog colorDialog1;
         private ToolStripButton btnImportBg;
         private ToolStripComboBox tscbSize;
+        private System.Windows.Forms.Button btnCopyCode;
     }
 }

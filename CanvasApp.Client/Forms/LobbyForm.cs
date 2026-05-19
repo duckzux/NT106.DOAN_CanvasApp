@@ -12,8 +12,8 @@ namespace CanvasApp.Client
         private CreateRoom createRoom;
         private RequirePassword requirePassword;
         private RoomCard _pendingJoinCard;
-        // Stores the invite code used for the pending join so we can retry with password
         private string _pendingInviteCode;
+        private string _pendingPassword = "";
 
         public LobbyForm()
         {
@@ -73,6 +73,7 @@ namespace CanvasApp.Client
                 if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrWhiteSpace(txtCode.Text))
                 {
                     _pendingInviteCode = txtCode.Text.Trim().ToUpper();
+                    _pendingPassword = txtPwd.Text;
                     await CanvasClient.Instance.JoinRoomByCodeAsync(_pendingInviteCode, txtPwd.Text);
                 }
             }
@@ -158,6 +159,7 @@ namespace CanvasApp.Client
         private async void JoinRoom(RoomCard card, string password)
         {
             _pendingJoinCard = card;
+            _pendingPassword = password;
             await CanvasClient.Instance.JoinRoomAsync(card.RoomId, password);
         }
 
@@ -182,7 +184,8 @@ namespace CanvasApp.Client
             _pendingInviteCode = null;
 
             var canvas = new CanvasForm();
-            canvas.SetRoom(res);
+            canvas.SetRoom(res, _pendingPassword);
+            _pendingPassword = "";
             canvas.Show();
             this.Hide();
 
@@ -212,6 +215,7 @@ namespace CanvasApp.Client
             requirePassword.OnSubmit = async (inputPass) =>
             {
                 requirePassword.Visible = false;
+                _pendingPassword = inputPass;
                 _pendingInviteCode = inviteCode;
                 await CanvasClient.Instance.JoinRoomByCodeAsync(inviteCode, inputPass);
             };
@@ -237,6 +241,7 @@ namespace CanvasApp.Client
 
                 createRoom.OnRoomCreated += async (name, pwd, template, maxText) =>
                 {
+                    _pendingPassword = pwd ?? "";
                     int max = 4;
                     if (!string.IsNullOrEmpty(maxText))
                         int.TryParse(maxText.Split(' ')[0], out max);

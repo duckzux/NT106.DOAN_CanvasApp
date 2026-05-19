@@ -108,7 +108,20 @@ namespace CanvasApp.Client
                     if (saveFileDialog.ShowDialog() == DialogResult.OK)
                     {
                         Bitmap bmp = new Bitmap(canvasPanel.Width, canvasPanel.Height);
-                        canvasPanel.DrawToBitmap(bmp, new Rectangle(0, 0, canvasPanel.Width, canvasPanel.Height));
+
+                        using (Graphics g = Graphics.FromImage(bmp))
+                        {
+                            g.Clear(Color.White);
+                            if (_bgImage != null)
+                            {
+                                g.DrawImage(_bgImage, 0, 0, _bgImage.Width, _bgImage.Height);
+                            }
+                            if (_bitmap != null)
+                            {
+                                g.DrawImage(_bitmap, 0, 0);
+                            }
+                        }    
+
                         System.Drawing.Imaging.ImageFormat format = System.Drawing.Imaging.ImageFormat.Png;
 
                         if (saveFileDialog.FilterIndex == 2)
@@ -118,7 +131,7 @@ namespace CanvasApp.Client
                         bmp.Save(saveFileDialog.FileName, format);
                         bmp.Dispose();
 
-                        MessageBox.Show("Đã xuất ảnh thành công rùi nha Nguyên ơi! 🎉", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        MessageBox.Show("Đã xuất ảnh thành công rùi nha bạn ơi! 🎉", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
                 }
             };

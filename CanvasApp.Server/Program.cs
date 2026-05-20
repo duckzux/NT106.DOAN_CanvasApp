@@ -394,6 +394,21 @@ namespace CanvasApp.Server
                         break;
                     }
 
+                    case MessageType.ROOM_RESOLVE:
+                    {
+                        // Routing-only query from the LB-routed short-lived socket: verify the
+                        // room + password and return where to direct-connect. NO Join, NO broadcast.
+                        var resolveReq = msg.GetData<ResolveRoomRequest>();
+                        var resolveRes = _roomManager.Resolve(resolveReq);
+                        if (resolveRes.Success)
+                        {
+                            resolveRes.ServerHost = _serverHost;
+                            resolveRes.ServerPort = _serverPort;
+                        }
+                        await client.SendAsync(new Message(MessageType.ROOM_RESOLVE_RESULT, resolveRes));
+                        break;
+                    }
+
                     case MessageType.ROOM_JOIN_BY_CODE:
                     {
                         var codeReq = msg.GetData<InviteCodeRequest>();

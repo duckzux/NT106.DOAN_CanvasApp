@@ -150,6 +150,11 @@ namespace CanvasApp.LoadBalancer
 
             // First writer wins — concurrent joins for a brand-new room all settle on one server
             var actual = _roomRouting.GetOrAdd(roomId, picked);
+            // Only the writer that actually inserted the mapping should increment the counter
+            // (so concurrent losers don't double-count). ReferenceEquals because GetOrAdd
+            // returns the existing value if it lost the race.
+            if (ReferenceEquals(actual, picked))
+                actual.IncrementRoomCount();
             Console.WriteLine($"[ROUTE] room {roomId} -> {actual.Endpoint} (newly bound, healthyCount={_canvasPool.Count(s => s.IsHealthy)})");
             return actual;
         }
@@ -162,10 +167,19 @@ namespace CanvasApp.LoadBalancer
         private void RegisterRoom(string roomId, ServerInfo server)
         {
             if (string.IsNullOrEmpty(roomId) || server == null) return;
+            bool inserted = false;
             _roomRouting.AddOrUpdate(
                 roomId,
-                server,
-                (key, existing) => existing.IsHealthy ? existing : server);
+                _ => { inserted = true; return server; },
+                (key, existing) =>
+                {
+                    if (existing.IsHealthy) return existing;
+                    // Replacing an unhealthy mapping: decrement the dead one, increment fresh.
+                    existing.DecrementRoomCount();
+                    inserted = true;
+                    return server;
+                });
+            if (inserted) server.IncrementRoomCount();
         }
 
         // ── Per-connection proxy ──────────────────────────────────────────
@@ -207,6 +221,26 @@ namespace CanvasApp.LoadBalancer
                 else if (type == MessageType.ROOM_JOIN)
                 {
                     var req = SafeGetData<JoinRoomRequest>(msg);
+                    if (req != null && !string.IsNullOrEmpty(req.RoomId))
+                    {
+                        target = RouteForRoom(req.RoomId);
+                        boundRoomId = req.RoomId;
+                    }
+                    else
+                    {
+                        target = PickCanvasLeastLoaded();
+                    }
+                    if (target == null)
+                    {
+                        Console.WriteLine($"[LB] {clientEp} rejected — no healthy Canvas backend");
+                        return;
+                    }
+                }
+                else if (type == MessageType.ROOM_RESOLVE)
+                {
+                    // Same affinity as ROOM_JOIN — the resolve must land on the server that
+                    // owns the room so the password check uses the canonical room metadata.
+                    var req = SafeGetData<ResolveRoomRequest>(msg);
                     if (req != null && !string.IsNullOrEmpty(req.RoomId))
                     {
                         target = RouteForRoom(req.RoomId);

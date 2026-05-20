@@ -54,6 +54,13 @@ namespace CanvasApp.Common
         public const string ROOM_JOIN_RESULT = "ROOM_JOIN_RESULT";
         public const string ROOM_LEAVE = "ROOM_LEAVE";
         public const string ROOM_UPDATE = "ROOM_UPDATE";
+        // Routing-only "pre-join" sent through the LoadBalancer. Server verifies the room
+        // exists + password matches and returns ServerHost/ServerPort. Crucially it does NOT
+        // register the user into the room and does NOT broadcast — so the LB-routed socket
+        // can close without firing a spurious join→leave→join sequence. The real ROOM_JOIN
+        // is then sent over the persistent direct connection.
+        public const string ROOM_RESOLVE = "ROOM_RESOLVE";
+        public const string ROOM_RESOLVE_RESULT = "ROOM_RESOLVE_RESULT";
 
         // Drawing (broadcast)
         public const string DRAW_START = "DRAW_START";

@@ -23,6 +23,7 @@ namespace CanvasApp.Client
             this.ctrlClose = new Guna.UI2.WinForms.Guna2ControlBox();
             this.guna2DragControl1 = new Guna.UI2.WinForms.Guna2DragControl(this.components);
             this.panel1 = new System.Windows.Forms.Panel();
+            this.lblGreeting = new System.Windows.Forms.Label();
             this.btnLogout = new Guna.UI2.WinForms.Guna2Button();
             this.pictureBox1 = new System.Windows.Forms.PictureBox();
             this.label1 = new System.Windows.Forms.Label();
@@ -75,12 +76,28 @@ namespace CanvasApp.Client
             // panel1
             // 
             this.panel1.BackColor = System.Drawing.Color.White;
+            this.panel1.Controls.Add(this.lblGreeting);
             this.panel1.Controls.Add(this.btnLogout);
             this.panel1.Controls.Add(this.pictureBox1);
             this.panel1.Location = new System.Drawing.Point(0, 30);
             this.panel1.Name = "panel1";
             this.panel1.Size = new System.Drawing.Size(1301, 100);
             this.panel1.TabIndex = 1;
+            // 
+            // lblGreeting
+            // 
+            this.lblGreeting.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
+            this.lblGreeting.AutoSize = true;
+            this.lblGreeting.BackColor = System.Drawing.Color.MediumPurple;
+            this.lblGreeting.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
+            this.lblGreeting.FlatStyle = System.Windows.Forms.FlatStyle.Popup;
+            this.lblGreeting.Font = new System.Drawing.Font("Montserrat ExtraBold", 10.2F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.lblGreeting.ForeColor = System.Drawing.Color.GhostWhite;
+            this.lblGreeting.Location = new System.Drawing.Point(930, 43);
+            this.lblGreeting.Name = "lblGreeting";
+            this.lblGreeting.Size = new System.Drawing.Size(116, 26);
+            this.lblGreeting.TabIndex = 3;
+            this.lblGreeting.Text = "Xin chào, ...";
             // 
             // btnLogout
             // 
@@ -162,6 +179,7 @@ namespace CanvasApp.Client
             this.Text = "LobbyForm";
             this.pnlTopBar.ResumeLayout(false);
             this.panel1.ResumeLayout(false);
+            this.panel1.PerformLayout();
             ((System.ComponentModel.ISupportInitialize)(this.pictureBox1)).EndInit();
             this.ResumeLayout(false);
             this.PerformLayout();
@@ -177,6 +195,7 @@ namespace CanvasApp.Client
         private System.Windows.Forms.Panel panel1;
         private System.Windows.Forms.PictureBox pictureBox1;
         private Guna.UI2.WinForms.Guna2Button btnLogout;
+        private System.Windows.Forms.Label lblGreeting;
         private System.Windows.Forms.Label label1;
         private Guna.UI2.WinForms.Guna2Button btnCreateShow;
         private System.Windows.Forms.FlowLayoutPanel flowLayoutPanel1;

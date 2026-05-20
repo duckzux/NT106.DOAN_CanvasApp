@@ -297,6 +297,34 @@ namespace CanvasApp.Server
                 && _rooms.TryGetValue(roomId, out var room) ? room : null;
         }
 
+        // ── Resolve (pre-join routing query, no state change) ─────────
+        // Used by the LB-routed short-lived socket to validate the room + password without
+        // adding the user to _roomClients or broadcasting. The actual Join happens on the
+        // client's persistent direct connection.
+        public ResolveRoomResult Resolve(ResolveRoomRequest req)
+        {
+            if (req == null || string.IsNullOrEmpty(req.RoomId))
+                return new ResolveRoomResult { Success = false, Message = "RoomId không hợp lệ" };
+
+            if (!_rooms.TryGetValue(req.RoomId, out var room))
+                return new ResolveRoomResult { Success = false, Message = "Room không tồn tại" };
+
+            if (room.HasPassword)
+            {
+                if (string.IsNullOrEmpty(req.Password))
+                    return new ResolveRoomResult
+                    {
+                        Success = false,
+                        Message = "Phòng yêu cầu mật khẩu",
+                        RequiresPassword = true
+                    };
+                if (!BCrypt.Net.BCrypt.Verify(req.Password, room.PasswordHash))
+                    return new ResolveRoomResult { Success = false, Message = "Sai mật khẩu" };
+            }
+
+            return new ResolveRoomResult { Success = true, Message = "OK" };
+        }
+
         // ── Join ──────────────────────────────────────────────────────
 
         public JoinRoomResult Join(JoinRoomRequest req, ConnectedClient client)

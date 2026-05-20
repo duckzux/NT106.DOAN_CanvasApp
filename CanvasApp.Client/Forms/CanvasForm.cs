@@ -40,6 +40,10 @@ namespace CanvasApp.Client
 
         private Room _room;
         private string _roomPassword;
+        // RoomId for the upcoming ROOM_JOIN, set by PrepareForJoin BEFORE Show().
+        // Used so the form can send the join itself on Shown — that ensures CHAT_HISTORY
+        // and ROOM_JOIN_RESULT arrive while OnServerMessage is already subscribed.
+        private string _pendingRoomId;
         private string _template = "Blank";
         private List<RoomMember> _initialMembers; // members lúc join (truyền từ LobbyForm)
 
@@ -255,6 +259,15 @@ namespace CanvasApp.Client
 
             CanvasClient.Instance.OnMessageReceived += OnServerMessage;
 
+            // Send ROOM_JOIN once the form is shown so the handle is live BEFORE the server
+            // starts streaming ROOM_JOIN_RESULT / CHAT_HISTORY / ROOM_UPDATE on this socket.
+            // Without this we'd race the subscription and lose CHAT_HISTORY.
+            this.Shown += async (s, e) =>
+            {
+                if (!string.IsNullOrEmpty(_pendingRoomId))
+                    await CanvasClient.Instance.JoinRoomAsync(_pendingRoomId, _roomPassword ?? "");
+            };
+
             // ── Smart shape recognition wiring ──────────────────────────
             _suggest.CommitShape += async (shape, color, thickness) =>
             {
@@ -311,53 +324,64 @@ namespace CanvasApp.Client
             };
         }
 
-        public void SetRoom(JoinRoomResult joinRes, string password = "")
+        /// <summary>
+        /// Called BEFORE Show() to seed the password (needed for reconnect) and roomId. The
+        /// actual Room + snapshot + members arrive later via <see cref="ApplyJoinResult"/>
+        /// when the persistent connection's ROOM_JOIN_RESULT lands. We split it this way so
+        /// the LB-routed pre-join (ROOM_RESOLVE) doesn't have to ship snapshot data — the
+        /// LB pre-join no longer triggers a real Join on the server.
+        /// </summary>
+        public void PrepareForJoin(string roomId, string password)
+        {
+            _pendingRoomId = roomId;
+            _roomPassword = password;
+        }
+
+        /// <summary>
+        /// Apply the ROOM_JOIN_RESULT received over the persistent connection: render member
+        /// panel, replay snapshot + delta actions onto the canvas, show the welcome system
+        /// message. Safe to call any time after Show() (handle is required).
+        /// </summary>
+        private void ApplyJoinResult(JoinRoomResult joinRes)
         {
             _room = joinRes.Room;
-            _roomPassword = password;
             _template = joinRes.Room?.Template ?? "Blank";
             _initialMembers = joinRes.Members ?? new List<RoomMember>();
-            this.Load += (s, e) =>
+
+            lblRoomName.Text = $"Phòng vẽ: {joinRes.Room.Name}";
+            var code = joinRes.Room.InviteCode ?? joinRes.Room.Id;
+            lblRoomCode.Text = $"Mã mời: {code}";
+
+            if (!string.IsNullOrEmpty(joinRes.SnapshotData))
             {
-                lblRoomName.Text = $"Phòng vẽ: {joinRes.Room.Name}";
-                // Show the invite code so users can share it
-                var code = joinRes.Room.InviteCode ?? joinRes.Room.Id;
-                lblRoomCode.Text = $"Mã mời: {code}";
-
-                // Apply compressed snapshot baseline first (if available),
-                // then apply the delta actions on top.
-                if (!string.IsNullOrEmpty(joinRes.SnapshotData))
+                try
                 {
-                    try
+                    var baseline = SnapshotHelper.Decompress(joinRes.SnapshotData);
+                    foreach (var action in baseline)
                     {
-                        var baseline = SnapshotHelper.Decompress(joinRes.SnapshotData);
-                        foreach (var action in baseline)
-                        {
-                            DrawActionLocal(action);
-                            // Synthesize an ID so older snapshots can still be undone by their owner later.
-                            if (string.IsNullOrEmpty(action.ActionId))
-                                action.ActionId = "srv-" + action.SeqNo;
-                            _history.Add(action);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        AppendSystemMessage($"[Cảnh báo] Không thể tải snapshot: {ex.Message}");
+                        DrawActionLocal(action);
+                        if (string.IsNullOrEmpty(action.ActionId))
+                            action.ActionId = "srv-" + action.SeqNo;
+                        _history.Add(action);
                     }
                 }
-
-                foreach (var action in joinRes.CanvasState)
+                catch (Exception ex)
                 {
-                    DrawActionLocal(action);
-                    if (string.IsNullOrEmpty(action.ActionId))
-                        action.ActionId = "srv-" + action.SeqNo;
-                    _history.Add(action);
+                    AppendSystemMessage($"[Cảnh báo] Không thể tải snapshot: {ex.Message}");
                 }
+            }
 
-                canvasPanel.Invalidate();
-                RenderUserList(_initialMembers);
-                AppendSystemMessage($"Bạn đã vào phòng '{joinRes.Room.Name}'.");
-            };
+            foreach (var action in joinRes.CanvasState)
+            {
+                DrawActionLocal(action);
+                if (string.IsNullOrEmpty(action.ActionId))
+                    action.ActionId = "srv-" + action.SeqNo;
+                _history.Add(action);
+            }
+
+            canvasPanel.Invalidate();
+            RenderUserList(_initialMembers);
+            AppendSystemMessage($"Bạn đã vào phòng '{joinRes.Room.Name}'.");
         }
 
         // ── Canvas init ─────────────────────────────────────────────────
@@ -1045,6 +1069,20 @@ namespace CanvasApp.Client
                             AppendFileMessage(fileMsg.Username, fileMsg.FileName, fileMsg.FileSizeBytes, fileId);
                         }
                         break;
+
+                    case MessageType.ROOM_JOIN_RESULT:
+                    {
+                        var joinRes = msg.GetData<JoinRoomResult>();
+                        if (joinRes == null || !joinRes.Success)
+                        {
+                            MessageBox.Show(joinRes?.Message ?? "Không vào được phòng",
+                                "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            this.Close();
+                            break;
+                        }
+                        ApplyJoinResult(joinRes);
+                        break;
+                    }
 
                     case MessageType.ROOM_UPDATE:
                         // ── Strongly-typed parse ────────────────────────

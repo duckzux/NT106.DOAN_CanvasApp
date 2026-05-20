@@ -106,6 +106,21 @@ namespace CanvasApp.Common
         public int ServerPort { get; set; }
     }
 
+    public class ResolveRoomRequest
+    {
+        public string RoomId { get; set; }
+        public string Password { get; set; }
+    }
+
+    public class ResolveRoomResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+        public bool RequiresPassword { get; set; }
+        public string ServerHost { get; set; }
+        public int ServerPort { get; set; }
+    }
+
     public class InviteCodeRequest
     {
         public string InviteCode { get; set; }

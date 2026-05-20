@@ -114,12 +114,16 @@ namespace CanvasApp.Server
                                 if (payload != null && !string.IsNullOrEmpty(payload.RoomId))
                                 {
                                     roomManager.UpdatePeerMembers(payload.OriginServerId, payload.RoomId, payload.Members);
-                                    // Refresh lobby user-count badges — this is the missing link
-                                    // that previously let lobby clients see stale counts when a
-                                    // user joined/left a room on a different Canvas server.
+                                    // Refresh lobby user-count badges so lobby clients see the
+                                    // updated counts when a user joined/left a room on a
+                                    // different Canvas server.
                                     await roomManager.BroadcastLobbyRoomListAsync();
-                                    // Push updated member list to local room clients so their UI stays current
-                                    await roomManager.BroadcastRoomMembersAsync(payload.RoomId);
+                                    // NOTE: do NOT call BroadcastRoomMembersAsync here. The
+                                    // matching PEER_RELAY ROOM_UPDATE that follows already
+                                    // re-broadcasts a fresh member list (rebuilt by
+                                    // ApplyFromPeerAsync). Doing it here too produced two
+                                    // ROOM_UPDATE messages per logical join/leave — the source
+                                    // of the "1 user counted as 2 / chat shown twice" bug.
                                 }
                                 break;
                             }

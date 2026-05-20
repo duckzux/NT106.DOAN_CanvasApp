@@ -9,14 +9,16 @@ namespace CanvasApp.Client
 {
     /// <summary>
     /// Short-lived TCP requests to the LoadBalancer. Every request opens a fresh socket so
-    /// the LB peeks the request type (e.g. ROOM_JOIN) on the FIRST message and routes by
-    /// room affinity — sharing one socket across multiple messages (ROOM_LIST then ROOM_JOIN)
-    /// would pin every later message to whichever server the LB picked for the first one,
-    /// breaking same-room stickiness.
+    /// the LB peeks the request type (e.g. ROOM_RESOLVE) on the FIRST message and routes
+    /// by room affinity — sharing one socket across multiple messages would pin every
+    /// later message to whichever server the LB picked for the first one, breaking
+    /// same-room stickiness.
     ///
-    /// Used by LobbyForm for ROOM_LIST / ROOM_CREATE / ROOM_JOIN / ROOM_JOIN_BY_CODE /
-    /// RESOLVE_INVITE_CODE. The persistent <see cref="CanvasClient"/> connection is opened
-    /// only AFTER a successful join, directly to the Canvas Server returned by the LB.
+    /// Used by LobbyForm for ROOM_LIST / ROOM_CREATE / ROOM_RESOLVE / RESOLVE_INVITE_CODE.
+    /// The actual ROOM_JOIN (which mutates room state and broadcasts joined-notifications)
+    /// is sent over the persistent <see cref="CanvasClient"/> connection that we open after
+    /// resolve succeeds — this avoids the LB-routed socket triggering a phantom join→leave→
+    /// join sequence on the server.
     /// </summary>
     public static class LobbyClient
     {
@@ -33,23 +35,21 @@ namespace CanvasApp.Client
                 new Message(MessageType.ROOM_CREATE, req),
                 MessageType.ROOM_CREATE_RESULT);
 
-        public static Task<JoinRoomResult> JoinRoomAsync(string roomId, string password) =>
-            QueryAsync<JoinRoomResult>(
-                new Message(MessageType.ROOM_JOIN,
-                    new JoinRoomRequest { RoomId = roomId, Password = password }),
-                MessageType.ROOM_JOIN_RESULT);
+        /// <summary>
+        /// Resolve a roomId+password to a Canvas Server address via the LB. Does NOT add the
+        /// user to the room — that happens later on the persistent direct connection.
+        /// </summary>
+        public static Task<ResolveRoomResult> ResolveRoomAsync(string roomId, string password) =>
+            QueryAsync<ResolveRoomResult>(
+                new Message(MessageType.ROOM_RESOLVE,
+                    new ResolveRoomRequest { RoomId = roomId, Password = password }),
+                MessageType.ROOM_RESOLVE_RESULT);
 
         public static Task<ResolveInviteCodeResult> ResolveInviteCodeAsync(string code) =>
             QueryAsync<ResolveInviteCodeResult>(
                 new Message(MessageType.RESOLVE_INVITE_CODE,
                     new ResolveInviteCodeRequest { InviteCode = code }),
                 MessageType.RESOLVE_INVITE_CODE_RESULT);
-
-        public static Task<JoinRoomResult> JoinRoomByCodeAsync(string inviteCode, string password, string roomId) =>
-            QueryAsync<JoinRoomResult>(
-                new Message(MessageType.ROOM_JOIN_BY_CODE,
-                    new InviteCodeRequest { InviteCode = inviteCode, Password = password, RoomId = roomId }),
-                MessageType.ROOM_JOIN_RESULT);
 
         /// <summary>
         /// Open TCP to LB → send one request → read lines until a message of

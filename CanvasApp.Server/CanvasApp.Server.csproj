@@ -113,6 +113,8 @@
     <Compile Include="CanvasServer.cs" />
     <Compile Include="ClientHandler.cs" />
     <Compile Include="HealthCheckService.cs" />
+    <Compile Include="PeerHandler.cs" />
+    <Compile Include="PeerManager.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="RoomManager.cs" />

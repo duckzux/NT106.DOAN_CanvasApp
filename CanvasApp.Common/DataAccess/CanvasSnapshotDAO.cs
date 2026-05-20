@@ -11,8 +11,13 @@ namespace CanvasApp.Common.DataAccess
         {
             using (var conn = DatabaseManager.OpenConnection())
             {
+                // INSERT IGNORE: multiple Canvas servers may autosave the same room concurrently and
+                // each computes (version = MAX(version)+1) from its local view. Without IGNORE the
+                // second writer would crash on the (room_id, version) unique key; with IGNORE we
+                // silently drop the loser — the deltas in draw_actions remain the source of truth,
+                // so missing a snapshot only costs a slightly longer replay on next load.
                 var cmd = new MySqlCommand(@"
-                    INSERT INTO canvas_snapshots(room_id, version, snapshot_data, action_seq_at, byte_size)
+                    INSERT IGNORE INTO canvas_snapshots(room_id, version, snapshot_data, action_seq_at, byte_size)
                     VALUES(@r, @v, @d, @seq, @sz)", conn);
                 cmd.Parameters.AddWithValue("@r", snap.RoomId);
                 cmd.Parameters.AddWithValue("@v", snap.Version);

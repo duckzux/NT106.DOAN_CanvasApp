@@ -31,13 +31,6 @@ namespace CanvasApp.LoadBalancer
         private int _authRR;
         private int _canvasRR;
 
-        // roomId → server that hosts (LB's belief, populated when LB routes ROOM_JOIN)
-        private readonly ConcurrentDictionary<string, ServerInfo> _roomRoutes =
-            new ConcurrentDictionary<string, ServerInfo>();
-        // roomId → active connections currently bound to that route
-        private readonly ConcurrentDictionary<string, int> _roomRefs =
-            new ConcurrentDictionary<string, int>();
-
         public LoadBalancer(
             IEnumerable<ServerInfo> servers,
             int listenPort,
@@ -120,50 +113,41 @@ namespace CanvasApp.LoadBalancer
         }
 
         /// <summary>
-        /// Room-affinity routing: nếu roomId đã có trong table và server đó còn UP → reuse.
-        /// Nếu không → chọn Canvas least-loaded + ghi mapping mới + tăng RoomCount.
+        /// Consistent hashing for room affinity: roomId maps to same server deterministically.
+        /// Uses CRC32(roomId) % healthyCanvasCount, so all LBs (even after restart) route
+        /// the same roomId to the same server.Fallback to least-loaded if chosen server unhealthy.
         /// </summary>
         private ServerInfo RouteForRoom(string roomId)
         {
-            if (_roomRoutes.TryGetValue(roomId, out var existing) && existing.IsHealthy)
-                return existing;
+            var healthy = _canvasPool.Where(s => s.IsHealthy).ToList();
+            if (healthy.Count == 0) return null;
 
-            var pick = PickCanvasLeastLoaded();
-            if (pick == null) return null;
+            // Compute consistent hash and pick server
+            uint hash = ComputeCrc32(roomId);
+            int idx = (int)(hash % (uint)healthy.Count);
+            var preferred = healthy[idx];
 
-            if (_roomRoutes.TryAdd(roomId, pick))
-            {
-                pick.IncrementRoomCount();
-                Console.WriteLine($"[ROUTE] room {roomId} -> {pick.Endpoint} (rooms={pick.RoomCount})");
-            }
-            else
-            {
-                // someone won the race; reuse whatever's there now (if still healthy)
-                if (_roomRoutes.TryGetValue(roomId, out var raced) && raced.IsHealthy)
-                    pick = raced;
-            }
-            return pick;
+            Console.WriteLine($"[ROUTE] room {roomId} -> {preferred.Endpoint} (hash={hash}, idx={idx}, healthyCount={healthy.Count})");
+            return preferred;
         }
 
-        private void RoomConnAcquired(string roomId)
+        /// <summary>CRC32 hash for consistent hashing — deterministic across all instances.</summary>
+        private static uint ComputeCrc32(string str)
         {
-            _roomRefs.AddOrUpdate(roomId, 1, (k, v) => v + 1);
+            if (string.IsNullOrEmpty(str)) return 0;
+            const uint poly = 0xedb88320;
+            uint crc = 0xffffffff;
+            foreach (char c in str)
+            {
+                crc ^= c;
+                for (int i = 0; i < 8; i++)
+                    crc = (crc >> 1) ^ ((crc & 1) == 1 ? poly : 0);
+            }
+            return crc ^ 0xffffffff;
         }
 
-        private void RoomConnReleased(string roomId)
-        {
-            int newCount = 1;
-            _roomRefs.AddOrUpdate(roomId, 0, (k, v) => { newCount = v - 1; return newCount < 0 ? 0 : newCount; });
-            if (newCount <= 0)
-            {
-                _roomRefs.TryRemove(roomId, out _);
-                if (_roomRoutes.TryRemove(roomId, out var srv))
-                {
-                    srv.DecrementRoomCount();
-                    Console.WriteLine($"[ROUTE] room {roomId} freed from {srv.Endpoint} (rooms={srv.RoomCount})");
-                }
-            }
-        }
+        // With consistent hashing, routes are deterministic and don't need cleanup.
+        // These methods are kept for API compatibility but do nothing.
 
         // ── Per-connection proxy ──────────────────────────────────────────
 
@@ -219,9 +203,29 @@ namespace CanvasApp.LoadBalancer
                         return;
                     }
                 }
+                else if (type == MessageType.ROOM_JOIN_BY_CODE)
+                {
+                    // If roomId is already resolved (from RESOLVE_INVITE_CODE), use room affinity
+                    var codeReq = SafeGetData<InviteCodeRequest>(msg);
+                    if (codeReq != null && !string.IsNullOrEmpty(codeReq.RoomId))
+                    {
+                        target = RouteForRoom(codeReq.RoomId);
+                        boundRoomId = codeReq.RoomId;
+                    }
+                    else
+                    {
+                        // Fallback: route to least-loaded (user hasn't called RESOLVE_INVITE_CODE first)
+                        target = PickCanvasLeastLoaded();
+                    }
+                    if (target == null)
+                    {
+                        Console.WriteLine($"[LB] {clientEp} rejected — no healthy Canvas backend");
+                        return;
+                    }
+                }
                 else
                 {
-                    // ROOM_LIST, ROOM_CREATE, ROOM_JOIN_BY_CODE, PING, malformed → Canvas
+                    // ROOM_LIST, ROOM_CREATE, RESOLVE_INVITE_CODE, PING, malformed → Canvas least-loaded
                     target = PickCanvasLeastLoaded();
                     if (target == null)
                     {
@@ -235,8 +239,6 @@ namespace CanvasApp.LoadBalancer
                     Console.WriteLine($"[LB] {clientEp} rejected — {target.Endpoint} at MaxConnections");
                     return;
                 }
-
-                if (boundRoomId != null) RoomConnAcquired(boundRoomId);
 
                 // 3) Open the backend socket.
                 backend = new TcpClient();
@@ -281,7 +283,6 @@ namespace CanvasApp.LoadBalancer
                 if (target != null)
                 {
                     target.ReleaseConnection();
-                    if (boundRoomId != null) RoomConnReleased(boundRoomId);
                     Console.WriteLine($"[LB] {clientEp} closed (backend {target.Endpoint} conns={target.ActiveConnections})");
                 }
             }
@@ -329,12 +330,19 @@ namespace CanvasApp.LoadBalancer
                 if (done != readTask) throw new TimeoutException();
 
                 int n = await readTask;
-                if (n == 0) return buf.Count == 0 ? null : Encoding.UTF8.GetString(buf.ToArray());
+                if (n == 0) return buf.Count == 0 ? null : StripBom(Encoding.UTF8.GetString(buf.ToArray()));
                 if (one[0] == (byte)'\n') break;
                 if (one[0] != (byte)'\r') buf.Add(one[0]);
             }
-            return Encoding.UTF8.GetString(buf.ToArray());
+            return StripBom(Encoding.UTF8.GetString(buf.ToArray()));
         }
+
+        // Clients open StreamWriter(stream, Encoding.UTF8) which emits a UTF-8 BOM on the first write.
+        // StreamReader-based backends strip it automatically, but our byte-level peek does not — without
+        // this, the BOM makes the first JSON unparseable and routing falls through to the Canvas default.
+        private const char Utf8Bom = '﻿';
+        private static string StripBom(string s) =>
+            !string.IsNullOrEmpty(s) && s[0] == Utf8Bom ? s.Substring(1) : s;
 
         private static T SafeGetData<T>(Message msg) where T : class
         {

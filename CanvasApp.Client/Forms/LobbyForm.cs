@@ -26,6 +26,16 @@ namespace CanvasApp.Client
             this.Load += async (s, e) =>
             {
                 AddJoinByCodeButton();
+
+                // ✅ Connect to LB to get room list (short-lived connection, will reconnect on join)
+                bool connected = await CanvasClient.Instance.ConnectToServerAsync(Session.LB_HOST, Session.LB_PORT);
+                if (!connected)
+                {
+                    MessageBox.Show("Không kết nối được server. Vui lòng kiểm tra kết nối.", "Lỗi mạng",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
                 await CanvasClient.Instance.RequestRoomListAsync();
             };
         }
@@ -163,7 +173,7 @@ namespace CanvasApp.Client
             await CanvasClient.Instance.JoinRoomAsync(card.RoomId, password);
         }
 
-        private void HandleJoinResult(JoinRoomResult res)
+        private async void HandleJoinResult(JoinRoomResult res)
         {
             if (!res.Success)
             {
@@ -183,16 +193,58 @@ namespace CanvasApp.Client
 
             _pendingInviteCode = null;
 
+            // ✅ LB trả về địa chỉ Canvas Server đúng room
+            string canvasHost = res.ServerHost ?? Session.LB_HOST;
+            int canvasPort = res.ServerPort > 0 ? res.ServerPort : 9002;
+
+            // ✅ Lưu vào Session để reconnect đúng server nếu mất kết nối
+            Session.CanvasHost = canvasHost;
+            Session.CanvasPort = canvasPort;
+
+            // Lưu password trước khi reset để gửi ROOM_JOIN lần 2 vào Canvas Server
+            string passwordForRejoin = _pendingPassword;
+            string roomIdForRejoin = res.Room?.Id;
+
+            // ✅ Unsubscribe LobbyForm events TRƯỚC khi switch server, tránh nhận message của Canvas connection
+            // (nếu không unsubscribe, ROOM_JOIN_RESULT lần 2 sẽ trigger HandleJoinResult lần nữa → mở 2 CanvasForm)
+            CanvasClient.Instance.OnMessageReceived -= OnServerMessage;
+            CanvasClient.Instance.OnDisconnected -= OnDisconnected;
+
+            // ✅ Connect đến Canvas Server (silent disconnect LB nhờ generation counter trong CanvasClient)
+            bool connected = await CanvasClient.Instance.ConnectToServerAsync(canvasHost, canvasPort);
+            if (!connected)
+            {
+                // Re-subscribe và reconnect LB để user vẫn dùng được Lobby
+                CanvasClient.Instance.OnMessageReceived += OnServerMessage;
+                CanvasClient.Instance.OnDisconnected += OnDisconnected;
+                await CanvasClient.Instance.ConnectToServerAsync(Session.LB_HOST, Session.LB_PORT);
+                MessageBox.Show("Không kết nối được Canvas Server!", "Lỗi mạng",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // ✅ Tạo CanvasForm (constructor sẽ tự subscribe OnMessageReceived)
             var canvas = new CanvasForm();
             canvas.SetRoom(res, _pendingPassword);
             _pendingPassword = "";
             canvas.Show();
             this.Hide();
 
-            canvas.FormClosed += (s, e) =>
+            // ✅ Gửi ROOM_JOIN lần 2 trên connection direct để Canvas Server biết client đang trong room
+            // (lần 1 đi qua LB; khi disconnect LB, server-side đã remove client khỏi room state)
+            if (!string.IsNullOrEmpty(roomIdForRejoin))
+                await CanvasClient.Instance.JoinRoomAsync(roomIdForRejoin, passwordForRejoin);
+
+            canvas.FormClosed += async (s, e) =>
             {
                 this.Show();
-                _ = CanvasClient.Instance.RequestRoomListAsync();
+                // ✅ Re-subscribe LobbyForm events
+                CanvasClient.Instance.OnMessageReceived += OnServerMessage;
+                CanvasClient.Instance.OnDisconnected += OnDisconnected;
+                // ✅ Re-connect LB để lấy room list mới (connection trước trỏ vào Canvas Server)
+                bool reConnected = await CanvasClient.Instance.ConnectToServerAsync(Session.LB_HOST, Session.LB_PORT);
+                if (reConnected)
+                    await CanvasClient.Instance.RequestRoomListAsync();
             };
         }
 

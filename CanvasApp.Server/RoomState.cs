@@ -32,6 +32,19 @@ namespace CanvasApp.Server
             Interlocked.Exchange(ref _seqNo, seq);
         }
 
+        // Advance the seq counter to at least `incoming` — used when a peer Canvas server
+        // relays an action so subsequent local NextSeqNo() calls don't collide with it.
+        // Safe under contention: compare-and-swap loop, only moves the counter forward.
+        public void AdvanceSeqIfGreater(long incoming)
+        {
+            while (true)
+            {
+                long cur = Interlocked.Read(ref _seqNo);
+                if (incoming <= cur) return;
+                if (Interlocked.CompareExchange(ref _seqNo, incoming, cur) == cur) return;
+            }
+        }
+
         // Returns the next snapshot version atomically (safe for concurrent ForceSnapshot + Tick).
         public int NextSnapshotVersion()
         {

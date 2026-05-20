@@ -58,14 +58,8 @@ namespace CanvasApp.Client
             Session.CurrentUser = result.User;
             Session.Token = result.Token;
 
-            // Kết nối persistent đến Canvas Server
-            bool connected = await CanvasClient.Instance.ConnectAsync();
-            if (!connected)
-            {
-                MessageBox.Show("Không kết nối được Canvas Server. Vui lòng kiểm tra server.",
-                    "Lỗi mạng", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
+            // ✅ KHÔNG connect Canvas Server ở đây
+            // Connection sẽ được thực hiện khi user bấm Join phòng
 
             var lobby = new LobbyForm();
             lobby.Show();

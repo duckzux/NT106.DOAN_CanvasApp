@@ -66,6 +66,12 @@ namespace CanvasApp.Server
         private readonly ConcurrentDictionary<string, DateTime> _lastEmptyTime
             = new ConcurrentDictionary<string, DateTime>();
 
+        // Peer-server members per room: peerServerId → roomId → members. Mirror of what other
+        // Canvas servers in the mesh have told us via PEER_MEMBER_SYNC. Merged into GetMembers()
+        // and GetRoomList() so clients see a unified view regardless of which server they hit.
+        private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, List<RoomMember>>> _peerMembers
+            = new ConcurrentDictionary<string, ConcurrentDictionary<string, List<RoomMember>>>();
+
         // Optional DB dependencies — null when DB is not configured
         private readonly RoomDAO _roomDao;
         private readonly RoomMemberDAO _memberDao;
@@ -165,6 +171,11 @@ namespace CanvasApp.Server
                 var deltas = _drawActionDao.GetSinceSeq(roomId, startSeq);
                 if (deltas.Count > 0)
                 {
+                    // Backfill synthetic ActionId for legacy DB rows so cross-client undo can target them.
+                    foreach (var d in deltas)
+                        if (string.IsNullOrEmpty(d.ActionId))
+                            d.ActionId = "srv-" + d.SeqNo;
+
                     if (_canvasState.TryGetValue(roomId, out var stateRef))
                         lock (stateRef) { stateRef.AddRange(deltas); }
 
@@ -243,7 +254,40 @@ namespace CanvasApp.Server
 
         // ── Room listing & invite-code lookup ─────────────────────────
 
-        public List<Room> GetRoomList() => _rooms.Values.ToList();
+        public List<Room> GetRoomList()
+        {
+            // Return shallow clones with CurrentUsers reflecting local + peer counts. We don't
+            // mutate the Room objects in _rooms because their CurrentUsers field is also touched
+            // by Join/Leave under different locks — keeping the merged view as ephemeral copies
+            // avoids racing on a shared field.
+            var result = new List<Room>(_rooms.Count);
+            foreach (var room in _rooms.Values)
+            {
+                int peerCount = 0;
+                foreach (var perPeer in _peerMembers.Values)
+                    if (perPeer.TryGetValue(room.Id, out var pm))
+                        peerCount += pm.Count;
+
+                int localCount = 0;
+                if (_roomClients.TryGetValue(room.Id, out var list))
+                    lock (list) { localCount = list.Count; }
+
+                result.Add(new Room
+                {
+                    Id = room.Id,
+                    Name = room.Name,
+                    OwnerId = room.OwnerId,
+                    OwnerName = room.OwnerName,
+                    Template = room.Template,
+                    MaxUsers = room.MaxUsers,
+                    CurrentUsers = localCount + peerCount,
+                    HasPassword = room.HasPassword,
+                    PasswordHash = room.PasswordHash,
+                    InviteCode = room.InviteCode
+                });
+            }
+            return result;
+        }
 
         public Room GetRoomByInviteCode(string code)
         {
@@ -365,6 +409,52 @@ namespace CanvasApp.Server
         public List<RoomMember> GetMembers(string roomId)
         {
             var members = new List<RoomMember>();
+            var seenUserIds = new HashSet<int>();
+            if (!_rooms.TryGetValue(roomId, out var room)) return members;
+
+            var colors = new[] { "#7856CF", "#F9A826", "#0DBF7E", "#E74C3C", "#3498DB", "#9B59B6", "#1ABC9C", "#E67E22" };
+
+            // Local clients first.
+            if (_roomClients.TryGetValue(roomId, out var list))
+            {
+                ConnectedClient[] snapshot;
+                lock (list) { snapshot = list.ToArray(); }
+
+                foreach (var c in snapshot)
+                {
+                    if (!seenUserIds.Add(c.UserId)) continue;
+                    members.Add(new RoomMember
+                    {
+                        UserId = c.UserId,
+                        Username = c.Username,
+                        Role = c.UserId == room.OwnerId ? "Owner" : "Member",
+                        AvatarColor = colors[Math.Abs(c.UserId) % colors.Length]
+                    });
+                }
+            }
+
+            // Then anyone connected to a peer server — deduped by UserId so the same user
+            // reported by two servers (rare, but possible during reconnect races) appears once.
+            foreach (var perPeer in _peerMembers.Values)
+            {
+                if (!perPeer.TryGetValue(roomId, out var peerList)) continue;
+                lock (peerList)
+                {
+                    foreach (var m in peerList)
+                    {
+                        if (!seenUserIds.Add(m.UserId)) continue;
+                        members.Add(m);
+                    }
+                }
+            }
+            return members;
+        }
+
+        // Local-only members snapshot — used to publish PEER_MEMBER_SYNC envelopes to peers
+        // (we never relay the peer-contributed members back; that would cause echo loops).
+        public List<RoomMember> GetLocalMembers(string roomId)
+        {
+            var members = new List<RoomMember>();
             if (!_roomClients.TryGetValue(roomId, out var list)) return members;
             if (!_rooms.TryGetValue(roomId, out var room)) return members;
 
@@ -372,7 +462,6 @@ namespace CanvasApp.Server
             lock (list) { snapshot = list.ToArray(); }
 
             var colors = new[] { "#7856CF", "#F9A826", "#0DBF7E", "#E74C3C", "#3498DB", "#9B59B6", "#1ABC9C", "#E67E22" };
-
             foreach (var c in snapshot)
             {
                 members.Add(new RoomMember
@@ -384,6 +473,19 @@ namespace CanvasApp.Server
                 });
             }
             return members;
+        }
+
+        // Snapshot of every room → local members. Sent in PEER_HELLO so a freshly-connected
+        // peer immediately knows our world without having to wait for the next change event.
+        public Dictionary<string, List<RoomMember>> GetAllLocalMembers()
+        {
+            var result = new Dictionary<string, List<RoomMember>>();
+            foreach (var roomId in _rooms.Keys)
+            {
+                var local = GetLocalMembers(roomId);
+                if (local.Count > 0) result[roomId] = local;
+            }
+            return result;
         }
 
         // ── Broadcast ─────────────────────────────────────────────────
@@ -400,6 +502,24 @@ namespace CanvasApp.Server
             }
         }
 
+        /// <summary>
+        /// Broadcasts current merged member list (with JoinedUsername=null) to all clients in room.
+        /// Called after PEER_MEMBER_SYNC arrives to keep local panels up-to-date without chat notification.
+        /// </summary>
+        public async Task BroadcastRoomMembersAsync(string roomId)
+        {
+            var members = GetMembers(roomId);
+            if (members.Count == 0) return;
+            var msg = new Message(MessageType.ROOM_UPDATE, new RoomMembersUpdate { Members = members });
+            await BroadcastAsync(roomId, msg);
+        }
+
+        /// <summary>Get canvas state list for a room (used by PEER_CANVAS_SYNC dedup).</summary>
+        public List<DrawAction> GetCanvasState(string roomId)
+        {
+            return _canvasState.TryGetValue(roomId, out var state) ? state : null;
+        }
+
         // ── Draw actions ──────────────────────────────────────────────
 
         public void RecordDrawAction(string roomId, DrawAction action)
@@ -409,6 +529,8 @@ namespace CanvasApp.Server
 
             action.SeqNo = rs.NextSeqNo();
             action.RoomId = roomId;
+            if (string.IsNullOrEmpty(action.ActionId))
+                action.ActionId = "srv-" + action.SeqNo;
             Interlocked.Increment(ref rs.DirtyActionCount);
 
             lock (state) { state.Add(action); }
@@ -419,18 +541,29 @@ namespace CanvasApp.Server
             _queue?.Enqueue(action);
         }
 
-        public long UndoLastAction(string roomId, int userId)
+        // Undoes the most recent action by this user in this room.
+        // Returns (seqNo, actionId) if undone; (-1, null) if no action to undo.
+        public (long SeqNo, string ActionId) UndoLastAction(string roomId, int userId)
         {
             var undoKey = roomId + ":" + userId;
-            if (!_undoStacks.TryGetValue(undoKey, out var stack)) return -1;
+            if (!_undoStacks.TryGetValue(undoKey, out var stack)) return (-1, null);
 
             long seqNo;
-            if (!stack.TryPop(out seqNo)) return -1;
+            if (!stack.TryPop(out seqNo)) return (-1, null);
 
+            string actionId = null;
             if (_canvasState.TryGetValue(roomId, out var state))
-                lock (state) { state.RemoveAll(a => a.SeqNo == seqNo); }
+            {
+                lock (state)
+                {
+                    var found = state.FirstOrDefault(a => a.SeqNo == seqNo);
+                    if (found != null) actionId = found.ActionId;
+                    state.RemoveAll(a => a.SeqNo == seqNo);
+                }
+            }
 
-            return seqNo;
+            if (string.IsNullOrEmpty(actionId)) actionId = "srv-" + seqNo;
+            return (seqNo, actionId);
         }
 
         public void ClearCanvas(string roomId)
@@ -564,6 +697,145 @@ namespace CanvasApp.Server
         {
             if (!_roomClients.TryGetValue(roomId, out var list)) return true;
             lock (list) { return list.Count == 0; }
+        }
+
+        // ── Peer mesh (Hướng C) ───────────────────────────────────────
+        //
+        // The mesh design:
+        //   • Each Canvas server still owns its own clients, in-memory canvas state, and DB
+        //     persistence. We do NOT pick a single "primary" per room.
+        //   • Every locally-originated room event (DRAW_*, CHAT_*, ROOM_UPDATE, DRAW_UNDO,
+        //     DRAW_CLEAR, DRAW_FILL) is wrapped in a PEER_RELAY envelope and pushed to every
+        //     peer Canvas server in PeerManager.
+        //   • Receiving servers call ApplyFromPeerAsync below: apply to local _canvasState so
+        //     new joiners on that server see the action, broadcast to local clients so live
+        //     viewers see it, but DO NOT persist to DB (the originator already did) and DO
+        //     NOT re-publish to other peers (avoids broadcast storms).
+        //   • Member lists are kept eventually-consistent via PEER_MEMBER_SYNC. _peerMembers
+        //     holds what each peer told us; GetMembers/GetRoomList merge them with ours.
+
+        public void UpdatePeerMembers(string peerId, string roomId, List<RoomMember> members)
+        {
+            if (string.IsNullOrEmpty(peerId) || string.IsNullOrEmpty(roomId)) return;
+            var perPeer = _peerMembers.GetOrAdd(peerId, _ => new ConcurrentDictionary<string, List<RoomMember>>());
+            perPeer[roomId] = members ?? new List<RoomMember>();
+        }
+
+        /// <summary>
+        /// Register a room created by a peer Canvas server so that local clients can see it
+        /// in their room list and accept join requests for it. Initialises the same in-memory
+        /// containers that `CreateRoom` would, but DOES NOT touch the DB (the originator
+        /// already persisted it) and does NOT mark `_canvasLoaded` so the first local joiner
+        /// still triggers `EnsureCanvasLoaded` from DB.
+        /// </summary>
+        public bool RegisterPeerRoom(Room room)
+        {
+            if (room == null || string.IsNullOrEmpty(room.Id)) return false;
+            if (!_rooms.TryAdd(room.Id, room)) return false; // already known
+
+            _canvasState[room.Id] = new List<DrawAction>();
+            _roomClients[room.Id] = new List<ConnectedClient>();
+            _roomStates[room.Id] = new RoomState(room.Id);
+            if (!string.IsNullOrEmpty(room.InviteCode))
+                _codeToRoomId[room.InviteCode] = room.Id;
+
+            Console.WriteLine($"  [Peer] Registered remote room '{room.Name}' ({room.Id}) code={room.InviteCode}");
+            return true;
+        }
+
+        /// <summary>Every room this server is aware of, used to seed PEER_HELLO snapshots.</summary>
+        public List<Room> GetAllKnownRooms() => _rooms.Values.ToList();
+
+        /// <summary>
+        /// Push a fresh ROOM_LIST_RESULT (with merged peer counts) to every local lobby client.
+        /// Called by PeerHandler whenever a peer event changes what GetRoomList would return,
+        /// so lobby badges stay in sync even when membership changes on a different server.
+        /// </summary>
+        public async Task BroadcastLobbyRoomListAsync()
+        {
+            var msg = new Message(MessageType.ROOM_LIST_RESULT,
+                new RoomListResult { Rooms = GetRoomList() });
+            await BroadcastToLobbyAsync(msg);
+        }
+
+        /// <summary>Forgets all peer-contributed state for a peer that just disconnected.</summary>
+        public void DropPeer(string peerId)
+        {
+            if (string.IsNullOrEmpty(peerId)) return;
+            _peerMembers.TryRemove(peerId, out _);
+        }
+
+        /// <summary>
+        /// Applies an envelope-inner message that arrived from another Canvas server: replays
+        /// it on local canvas state (if any clients here might want it) and broadcasts to local
+        /// clients. Never writes to DB and never re-relays.
+        /// </summary>
+        public async Task ApplyFromPeerAsync(string roomId, string originServerId, Message inner)
+        {
+            if (inner == null || string.IsNullOrEmpty(roomId)) return;
+            // Don't ghost-create rooms — if this server has never heard of the room, skip the
+            // action. A future join on this server will load fresh state from DB.
+            if (!_rooms.ContainsKey(roomId)) return;
+
+            // Only mutate in-memory canvas state if this server has already loaded the room
+            // from DB. Otherwise the next EnsureCanvasLoaded will pull everything from disk
+            // (including this action, since the originating server persisted it).
+            bool loaded = _canvasLoaded.ContainsKey(roomId);
+
+            switch (inner.Type)
+            {
+                case MessageType.DRAW_END:
+                case MessageType.DRAW_SHAPE:
+                case MessageType.DRAW_TEXT:
+                case MessageType.DRAW_FILL:
+                {
+                    var action = inner.GetData<DrawAction>();
+                    if (action != null && loaded)
+                    {
+                        if (_canvasState.TryGetValue(roomId, out var state))
+                            lock (state) { state.Add(action); }
+                        if (_roomStates.TryGetValue(roomId, out var rs))
+                            rs.AdvanceSeqIfGreater(action.SeqNo);
+                    }
+                    break;
+                }
+
+                case MessageType.DRAW_UNDO:
+                {
+                    var notif = inner.GetData<UndoNotification>();
+                    if (notif != null && loaded && _canvasState.TryGetValue(roomId, out var state))
+                        lock (state) { state.RemoveAll(a => a.ActionId == notif.ActionId); }
+                    break;
+                }
+
+                case MessageType.DRAW_CLEAR:
+                {
+                    if (loaded && _canvasState.TryGetValue(roomId, out var state))
+                        lock (state) { state.Clear(); }
+                    _snapshotCache.TryRemove(roomId, out _);
+                    break;
+                }
+
+                case MessageType.ROOM_UPDATE:
+                {
+                    // Rebuild ROOM_UPDATE with THIS server's merged member list (not peer's stale list)
+                    // Preserve JoinedUsername/LeftUsername so notifications work, but sync member panel
+                    var peerUpdate = inner.GetData<RoomMembersUpdate>();
+                    var freshUpdate = new Message(MessageType.ROOM_UPDATE, new RoomMembersUpdate
+                    {
+                        Members = GetMembers(roomId),
+                        JoinedUsername = peerUpdate?.JoinedUsername,
+                        LeftUsername = peerUpdate?.LeftUsername
+                    });
+                    await BroadcastAsync(roomId, freshUpdate);
+                    return;  // don't fall through to the generic broadcast below
+                }
+
+                // DRAW_START / DRAW_MOVE / CHAT_* — purely live signals, nothing to apply to
+                // the persistent state. Just rebroadcast below.
+            }
+
+            await BroadcastAsync(roomId, inner);
         }
     }
 }

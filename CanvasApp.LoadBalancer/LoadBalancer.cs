@@ -31,6 +31,14 @@ namespace CanvasApp.LoadBalancer
         private int _authRR;
         private int _canvasRR;
 
+        // ── Room routing table ─────────────────────────────────────────────
+        // Sticky mapping: roomId → Canvas server currently hosting that room.
+        // First user to join a not-yet-mapped room picks the least-loaded canvas; every later
+        // joiner of the same room is steered to the same server so canvas state stays consistent.
+        // Mapping is also populated by sniffing ROOM_CREATE_RESULT so creators "claim" the server.
+        private readonly ConcurrentDictionary<string, ServerInfo> _roomRouting
+            = new ConcurrentDictionary<string, ServerInfo>(StringComparer.OrdinalIgnoreCase);
+
         public LoadBalancer(
             IEnumerable<ServerInfo> servers,
             int listenPort,
@@ -113,41 +121,52 @@ namespace CanvasApp.LoadBalancer
         }
 
         /// <summary>
-        /// Consistent hashing for room affinity: roomId maps to same server deterministically.
-        /// Uses CRC32(roomId) % healthyCanvasCount, so all LBs (even after restart) route
-        /// the same roomId to the same server.Fallback to least-loaded if chosen server unhealthy.
+        /// Room-affinity routing via an explicit table:
+        ///   1) If <paramref name="roomId"/> is already bound to a healthy server → return it.
+        ///   2) Otherwise pick the least-loaded canvas, store the mapping, return it.
+        /// Stickiness is what guarantees that every user joining the same room reaches the same
+        /// Canvas Server — that server's in-RAM <c>RoomManager</c> holds the canonical draw
+        /// actions and member list, so co-located clients can't drift out of sync.
         /// </summary>
         private ServerInfo RouteForRoom(string roomId)
         {
-            var healthy = _canvasPool.Where(s => s.IsHealthy).ToList();
-            if (healthy.Count == 0) return null;
+            if (string.IsNullOrEmpty(roomId)) return PickCanvasLeastLoaded();
 
-            // Compute consistent hash and pick server
-            uint hash = ComputeCrc32(roomId);
-            int idx = (int)(hash % (uint)healthy.Count);
-            var preferred = healthy[idx];
-
-            Console.WriteLine($"[ROUTE] room {roomId} -> {preferred.Endpoint} (hash={hash}, idx={idx}, healthyCount={healthy.Count})");
-            return preferred;
-        }
-
-        /// <summary>CRC32 hash for consistent hashing — deterministic across all instances.</summary>
-        private static uint ComputeCrc32(string str)
-        {
-            if (string.IsNullOrEmpty(str)) return 0;
-            const uint poly = 0xedb88320;
-            uint crc = 0xffffffff;
-            foreach (char c in str)
+            // Sticky lookup
+            if (_roomRouting.TryGetValue(roomId, out var bound))
             {
-                crc ^= c;
-                for (int i = 0; i < 8; i++)
-                    crc = (crc >> 1) ^ ((crc & 1) == 1 ? poly : 0);
+                if (bound.IsHealthy)
+                {
+                    Console.WriteLine($"[ROUTE] room {roomId} -> {bound.Endpoint} (sticky)");
+                    return bound;
+                }
+                // Bound server is down — drop the mapping so we can pick a fresh one
+                _roomRouting.TryRemove(roomId, out _);
+                Console.WriteLine($"[ROUTE] room {roomId} previous binding {bound.Endpoint} is DOWN; rebinding");
             }
-            return crc ^ 0xffffffff;
+
+            var picked = PickCanvasLeastLoaded();
+            if (picked == null) return null;
+
+            // First writer wins — concurrent joins for a brand-new room all settle on one server
+            var actual = _roomRouting.GetOrAdd(roomId, picked);
+            Console.WriteLine($"[ROUTE] room {roomId} -> {actual.Endpoint} (newly bound, healthyCount={_canvasPool.Count(s => s.IsHealthy)})");
+            return actual;
         }
 
-        // With consistent hashing, routes are deterministic and don't need cleanup.
-        // These methods are kept for API compatibility but do nothing.
+        /// <summary>
+        /// Register a room → server binding from outside the per-connection path. Used after
+        /// sniffing ROOM_CREATE_RESULT so the creator's server is locked in before the first
+        /// remote join arrives.
+        /// </summary>
+        private void RegisterRoom(string roomId, ServerInfo server)
+        {
+            if (string.IsNullOrEmpty(roomId) || server == null) return;
+            _roomRouting.AddOrUpdate(
+                roomId,
+                server,
+                (key, existing) => existing.IsHealthy ? existing : server);
+        }
 
         // ── Per-connection proxy ──────────────────────────────────────────
 
@@ -267,6 +286,41 @@ namespace CanvasApp.LoadBalancer
                 var firstBytes = Encoding.UTF8.GetBytes(firstLine + "\n");
                 await backendStream.WriteAsync(firstBytes, 0, firstBytes.Length);
                 await backendStream.FlushAsync();
+
+                // ✅ For ROOM_CREATE we intercept the first response line to learn the new
+                // room's Id, then register the routing mapping immediately. Without this,
+                // a subsequent ROOM_JOIN for the freshly-created room could land on a
+                // different server (least-loaded) before any user "claims" the binding.
+                if (type == MessageType.ROOM_CREATE)
+                {
+                    try
+                    {
+                        var responseLine = await ReadOneLineAsync(backendStream, _peekMaxBytes, 10_000);
+                        if (!string.IsNullOrEmpty(responseLine))
+                        {
+                            try
+                            {
+                                var respMsg = Message.FromJson(responseLine);
+                                if (respMsg?.Type == MessageType.ROOM_CREATE_RESULT)
+                                {
+                                    var newRoom = SafeGetData<Room>(respMsg);
+                                    if (newRoom != null && !string.IsNullOrEmpty(newRoom.Id))
+                                    {
+                                        RegisterRoom(newRoom.Id, target);
+                                        Console.WriteLine($"[ROUTE] claim on create: {newRoom.Id} -> {target.Endpoint}");
+                                    }
+                                }
+                            }
+                            catch { /* unparseable — just forward */ }
+
+                            var respBytes = Encoding.UTF8.GetBytes(responseLine + "\n");
+                            await clientStream.WriteAsync(respBytes, 0, respBytes.Length);
+                            await clientStream.FlushAsync();
+                        }
+                    }
+                    catch (TimeoutException) { Console.WriteLine($"[LB] {clientEp} ROOM_CREATE_RESULT timeout"); }
+                    catch (Exception ex) { Console.WriteLine($"[LB] {clientEp} sniff error: {ex.Message}"); }
+                }
 
                 var c2s = PumpAsync(client, backend, _bufferSize);
                 var s2c = PumpAsync(backend, client, _bufferSize);

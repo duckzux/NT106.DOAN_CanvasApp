@@ -3,40 +3,36 @@ using System.Drawing;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using CanvasApp.Common;
-using CanvasMessage = CanvasApp.Common.Message;
 
 namespace CanvasApp.Client
 {
+    /// <summary>
+    /// Lobby uses short-lived TCP queries to the LoadBalancer (no persistent socket while in
+    /// the lobby). Every request — ROOM_LIST, ROOM_CREATE, ROOM_JOIN, RESOLVE_INVITE_CODE —
+    /// opens its own connection so the LB peeks that specific message and routes by room
+    /// affinity. The persistent <see cref="CanvasClient"/> is only opened AFTER ROOM_JOIN
+    /// succeeds, directly to the Canvas Server the LB chose for this room.
+    /// </summary>
     public partial class LobbyForm : Form
     {
         private CreateRoom createRoom;
         private RequirePassword requirePassword;
-        private RoomCard _pendingJoinCard;
-        private string _pendingInviteCode;
-        private string _pendingPassword = "";
 
         public LobbyForm()
         {
             InitializeComponent();
             btnLogout.Click += btnLogout_Click;
 
-            CanvasClient.Instance.OnMessageReceived += OnServerMessage;
-            CanvasClient.Instance.OnDisconnected += OnDisconnected;
-
             this.Load += async (s, e) =>
             {
                 AddJoinByCodeButton();
+                await RefreshRoomListAsync();
+            };
 
-                // ✅ Connect to LB to get room list (short-lived connection, will reconnect on join)
-                bool connected = await CanvasClient.Instance.ConnectToServerAsync(Session.LB_HOST, Session.LB_PORT);
-                if (!connected)
-                {
-                    MessageBox.Show("Không kết nối được server. Vui lòng kiểm tra kết nối.", "Lỗi mạng",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-                await CanvasClient.Instance.RequestRoomListAsync();
+            this.Shown += async (s, e) =>
+            {
+                // After returning from CanvasForm, lobby is shown again — refresh the list.
+                if (this.Visible) await RefreshRoomListAsync();
             };
         }
 
@@ -82,60 +78,27 @@ namespace CanvasApp.Client
 
                 if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrWhiteSpace(txtCode.Text))
                 {
-                    _pendingInviteCode = txtCode.Text.Trim().ToUpper();
-                    _pendingPassword = txtPwd.Text;
-                    await CanvasClient.Instance.JoinRoomByCodeAsync(_pendingInviteCode, txtPwd.Text);
+                    var inviteCode = txtCode.Text.Trim().ToUpper();
+                    await JoinRoomByCodeAsync(inviteCode, txtPwd.Text);
                 }
             }
         }
 
-        // ── Server message handler ──────────────────────────────────────
-        private void OnServerMessage(CanvasMessage msg)
+        // ── LB queries (each one fresh short-lived TCP) ─────────────────
+
+        private async Task RefreshRoomListAsync()
         {
-            if (this.IsDisposed) return;
-
-            this.BeginInvoke((Action)(() =>
+            var list = await LobbyClient.GetRoomListAsync();
+            if (list == null)
             {
-                switch (msg.Type)
-                {
-                    case MessageType.ROOM_LIST_RESULT:
-                        var list = msg.GetData<RoomListResult>();
-                        RefreshRoomList(list);
-                        break;
-
-                    case MessageType.ROOM_CREATE_RESULT:
-                        // The creator gets this; others get ROOM_LIST_RESULT pushed from server
-                        var newRoom = msg.GetData<Room>();
-                        AddRoomCard(newRoom);
-                        if (createRoom != null) createRoom.Visible = false;
-                        break;
-
-                    case MessageType.ROOM_JOIN_RESULT:
-                        var joinRes = msg.GetData<JoinRoomResult>();
-                        HandleJoinResult(joinRes);
-                        break;
-
-                    case MessageType.CHAT_HISTORY:
-                        // Chat history is only relevant inside CanvasForm; ignore here.
-                        break;
-                }
-            }));
-        }
-
-        private void OnDisconnected()
-        {
-            if (this.IsDisposed) return;
-            this.BeginInvoke((Action)(() =>
-            {
-                MessageBox.Show("Mất kết nối với server!", "Lỗi mạng",
+                MessageBox.Show("Không kết nối được Load Balancer.", "Lỗi mạng",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                Session.Clear();
-                new LoginForm().Show();
-                this.Close();
-            }));
+                return;
+            }
+            RenderRoomList(list);
         }
 
-        private void RefreshRoomList(RoomListResult result)
+        private void RenderRoomList(RoomListResult result)
         {
             flowLayoutPanel1.Controls.Clear();
             foreach (var r in result.Rooms)
@@ -148,7 +111,7 @@ namespace CanvasApp.Client
             {
                 RoomId = room.Id,
                 RoomName = room.Name,
-                Password = room.HasPassword ? "***" : null, // chỉ marker, server giữ password thật
+                Password = room.HasPassword ? "***" : null,
                 MaxPlayers = room.MaxUsers,
                 CurrentPlayers = room.CurrentUsers
             };
@@ -159,96 +122,102 @@ namespace CanvasApp.Client
                 if (rc.HasPassword)
                     ShowRequirePassword(rc);
                 else
-                    JoinRoom(rc, "");
+                    _ = JoinRoomAsync(rc.RoomId, "");
             };
 
             flowLayoutPanel1.Controls.Add(card);
         }
 
         // ── Join logic ──────────────────────────────────────────────────
-        private async void JoinRoom(RoomCard card, string password)
+
+        private async Task JoinRoomAsync(string roomId, string password)
         {
-            _pendingJoinCard = card;
-            _pendingPassword = password;
-            await CanvasClient.Instance.JoinRoomAsync(card.RoomId, password);
+            // 1) Ask LB to route the join. LB looks up routing table → forwards to the correct
+            //    Canvas Server. Reply carries ServerHost/ServerPort so we know where to direct-connect.
+            var res = await LobbyClient.JoinRoomAsync(roomId, password);
+            await HandleJoinResultAsync(res, roomId, password);
         }
 
-        private async void HandleJoinResult(JoinRoomResult res)
+        private async Task JoinRoomByCodeAsync(string inviteCode, string password)
         {
-            if (!res.Success)
+            // Two-step so LB has the resolved roomId when routing the ROOM_JOIN_BY_CODE:
+            //   1) RESOLVE_INVITE_CODE → roomId  (any canvas can answer)
+            //   2) ROOM_JOIN_BY_CODE with that roomId → LB looks up routing table → correct canvas
+            var resolved = await LobbyClient.ResolveInviteCodeAsync(inviteCode);
+            if (resolved == null || !resolved.Success)
             {
-                // Server says the room requires a password that wasn't supplied
-                // (happens when joining by invite code without entering a password)
-                if (res.RequiresPassword && !string.IsNullOrEmpty(_pendingInviteCode))
-                {
-                    ShowRequirePasswordForCode(_pendingInviteCode);
-                    return;
-                }
-
-                MessageBox.Show(res.Message, "Không vào được phòng",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                _pendingInviteCode = null;
+                MessageBox.Show(resolved?.Message ?? "Không kết nối được server.",
+                    "Mã mời không hợp lệ", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            _pendingInviteCode = null;
+            var res = await LobbyClient.JoinRoomByCodeAsync(inviteCode, password, resolved.RoomId);
 
-            // ✅ LB trả về địa chỉ Canvas Server đúng room
+            // Special-case: server asks for password (only known after the resolve)
+            if (res != null && !res.Success && res.RequiresPassword)
+            {
+                ShowRequirePasswordForCode(inviteCode);
+                return;
+            }
+
+            await HandleJoinResultAsync(res, resolved.RoomId, password);
+        }
+
+        private async Task HandleJoinResultAsync(JoinRoomResult res, string roomIdForRejoin, string passwordForRejoin)
+        {
+            if (res == null)
+            {
+                MessageBox.Show("Load Balancer không phản hồi.", "Lỗi mạng",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!res.Success)
+            {
+                MessageBox.Show(res.Message, "Không vào được phòng",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
             string canvasHost = res.ServerHost ?? Session.LB_HOST;
-            int canvasPort = res.ServerPort > 0 ? res.ServerPort : 9002;
+            int    canvasPort = res.ServerPort > 0 ? res.ServerPort : 9002;
 
-            // ✅ Lưu vào Session để reconnect đúng server nếu mất kết nối
+            // Persist for reconnect attempts inside CanvasForm
             Session.CanvasHost = canvasHost;
             Session.CanvasPort = canvasPort;
 
-            // Lưu password trước khi reset để gửi ROOM_JOIN lần 2 vào Canvas Server
-            string passwordForRejoin = _pendingPassword;
-            string roomIdForRejoin = res.Room?.Id;
-
-            // ✅ Unsubscribe LobbyForm events TRƯỚC khi switch server, tránh nhận message của Canvas connection
-            // (nếu không unsubscribe, ROOM_JOIN_RESULT lần 2 sẽ trigger HandleJoinResult lần nữa → mở 2 CanvasForm)
-            CanvasClient.Instance.OnMessageReceived -= OnServerMessage;
-            CanvasClient.Instance.OnDisconnected -= OnDisconnected;
-
-            // ✅ Connect đến Canvas Server (silent disconnect LB nhờ generation counter trong CanvasClient)
+            // 2) Open the PERSISTENT TCP to the actual Canvas Server the LB pointed us to.
+            //    From this moment on, the user's draw/chat traffic flows over this socket.
             bool connected = await CanvasClient.Instance.ConnectToServerAsync(canvasHost, canvasPort);
             if (!connected)
             {
-                // Re-subscribe và reconnect LB để user vẫn dùng được Lobby
-                CanvasClient.Instance.OnMessageReceived += OnServerMessage;
-                CanvasClient.Instance.OnDisconnected += OnDisconnected;
-                await CanvasClient.Instance.ConnectToServerAsync(Session.LB_HOST, Session.LB_PORT);
                 MessageBox.Show("Không kết nối được Canvas Server!", "Lỗi mạng",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            // ✅ Tạo CanvasForm (constructor sẽ tự subscribe OnMessageReceived)
+            // 3) Open CanvasForm (it subscribes to CanvasClient events in its ctor) and prime
+            //    it with the snapshot + members from the LB-routed join reply.
             var canvas = new CanvasForm();
-            canvas.SetRoom(res, _pendingPassword);
-            _pendingPassword = "";
+            canvas.SetRoom(res, passwordForRejoin);
             canvas.Show();
             this.Hide();
 
-            // ✅ Gửi ROOM_JOIN lần 2 trên connection direct để Canvas Server biết client đang trong room
-            // (lần 1 đi qua LB; khi disconnect LB, server-side đã remove client khỏi room state)
+            // 4) Re-send ROOM_JOIN on the direct connection so the Canvas Server registers
+            //    this socket as belonging to the room (the LB-side socket has been closed,
+            //    so the server's view of the client from step 1 is already gone). The
+            //    second join also triggers CHAT_HISTORY + ROOM_UPDATE on the persistent
+            //    connection, which is what CanvasForm wants to react to.
             if (!string.IsNullOrEmpty(roomIdForRejoin))
                 await CanvasClient.Instance.JoinRoomAsync(roomIdForRejoin, passwordForRejoin);
 
             canvas.FormClosed += async (s, e) =>
             {
                 this.Show();
-                // ✅ Re-subscribe LobbyForm events
-                CanvasClient.Instance.OnMessageReceived += OnServerMessage;
-                CanvasClient.Instance.OnDisconnected += OnDisconnected;
-                // ✅ Re-connect LB để lấy room list mới (connection trước trỏ vào Canvas Server)
-                bool reConnected = await CanvasClient.Instance.ConnectToServerAsync(Session.LB_HOST, Session.LB_PORT);
-                if (reConnected)
-                    await CanvasClient.Instance.RequestRoomListAsync();
+                await RefreshRoomListAsync();
             };
         }
 
-        // Shows a password dialog then retries the invite-code join with the password.
         private void ShowRequirePasswordForCode(string inviteCode)
         {
             if (requirePassword == null || requirePassword.IsDisposed)
@@ -267,15 +236,9 @@ namespace CanvasApp.Client
             requirePassword.OnSubmit = async (inputPass) =>
             {
                 requirePassword.Visible = false;
-                _pendingPassword = inputPass;
-                _pendingInviteCode = inviteCode;
-                await CanvasClient.Instance.JoinRoomByCodeAsync(inviteCode, inputPass);
+                await JoinRoomByCodeAsync(inviteCode, inputPass);
             };
-            requirePassword.OnCancel = () =>
-            {
-                requirePassword.Visible = false;
-                _pendingInviteCode = null;
-            };
+            requirePassword.OnCancel = () => requirePassword.Visible = false;
         }
 
         // ── UI handlers ─────────────────────────────────────────────────
@@ -293,18 +256,29 @@ namespace CanvasApp.Client
 
                 createRoom.OnRoomCreated += async (name, pwd, template, maxText) =>
                 {
-                    _pendingPassword = pwd ?? "";
                     int max = 4;
                     if (!string.IsNullOrEmpty(maxText))
                         int.TryParse(maxText.Split(' ')[0], out max);
 
-                    await CanvasClient.Instance.CreateRoomAsync(new CreateRoomRequest
+                    var newRoom = await LobbyClient.CreateRoomAsync(new CreateRoomRequest
                     {
                         Name = name,
                         Password = pwd,
                         Template = template,
                         MaxUsers = max
                     });
+
+                    createRoom.Visible = false;
+
+                    if (newRoom == null)
+                    {
+                        MessageBox.Show("Tạo phòng thất bại.", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    // The LB has already claimed this room's routing on the create response,
+                    // so the upcoming join lands on the same server that owns the state.
+                    await JoinRoomAsync(newRoom.Id, pwd ?? "");
                 };
 
                 createRoom.OnCancel += () => createRoom.Visible = false;
@@ -314,10 +288,8 @@ namespace CanvasApp.Client
             createRoom.BringToFront();
         }
 
-        private async void btnLogout_Click(object sender, EventArgs e)
+        private void btnLogout_Click(object sender, EventArgs e)
         {
-            CanvasClient.Instance.OnMessageReceived -= OnServerMessage;
-            CanvasClient.Instance.OnDisconnected -= OnDisconnected;
             CanvasClient.Instance.Disconnect();
             Session.Clear();
 
@@ -341,10 +313,10 @@ namespace CanvasApp.Client
             requirePassword.Visible = true;
             requirePassword.BringToFront();
 
-            requirePassword.OnSubmit = (inputPass) =>
+            requirePassword.OnSubmit = async (inputPass) =>
             {
                 requirePassword.Visible = false;
-                JoinRoom(roomCard, inputPass);
+                await JoinRoomAsync(roomCard.RoomId, inputPass);
             };
             requirePassword.OnCancel = () => requirePassword.Visible = false;
         }

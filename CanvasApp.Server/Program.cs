@@ -243,7 +243,8 @@ namespace CanvasApp.Server
         private static async Task HandleClient(TcpClient tcp)
         {
             var endpoint = tcp.Client.RemoteEndPoint.ToString();
-            Console.WriteLine($"[+] Client {endpoint} connected");
+            // Silent probes (LB health check: connect + close, 0 bytes) stay un-logged.
+            bool gotData = false;
 
             var client = new ConnectedClient { Tcp = tcp };
             _roomManager.RegisterClient(client);
@@ -258,13 +259,19 @@ namespace CanvasApp.Server
                     string line;
                     while ((line = await reader.ReadLineAsync()) != null)
                     {
+                        if (!gotData)
+                        {
+                            gotData = true;
+                            Console.WriteLine($"[+] Client {endpoint} connected");
+                        }
                         await ProcessAsync(client, line);
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[!] {endpoint} {ex.Message}");
+                if (gotData)
+                    Console.WriteLine($"[!] {endpoint} {ex.Message}");
             }
             finally
             {
@@ -297,7 +304,8 @@ namespace CanvasApp.Server
                 }
 
                 tcp.Close();
-                Console.WriteLine($"[-] {endpoint} disconnected");
+                if (gotData)
+                    Console.WriteLine($"[-] {endpoint} disconnected");
             }
         }
 

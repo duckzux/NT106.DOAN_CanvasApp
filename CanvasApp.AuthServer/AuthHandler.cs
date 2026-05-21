@@ -26,7 +26,8 @@ namespace CanvasApp.AuthServer
         public async Task HandleClientAsync(TcpClient client)
         {
             var endpoint = client.Client.RemoteEndPoint?.ToString() ?? "?";
-            Console.WriteLine($"[+] Auth connect {endpoint}");
+            // Silent probes (LB health check: connect + close, 0 bytes) stay un-logged.
+            bool gotData = false;
             try
             {
                 using (var stream = client.GetStream())
@@ -36,6 +37,11 @@ namespace CanvasApp.AuthServer
                     string line;
                     while ((line = await reader.ReadLineAsync()) != null)
                     {
+                        if (!gotData)
+                        {
+                            gotData = true;
+                            Console.WriteLine($"[+] Auth connect {endpoint}");
+                        }
                         var response = ProcessMessage(line);
                         if (response != null)
                             await writer.WriteLineAsync(response.ToJson());
@@ -44,12 +50,14 @@ namespace CanvasApp.AuthServer
             }
             catch (Exception ex) when (!(ex is OperationCanceledException))
             {
-                Console.WriteLine($"[!] {endpoint}: {ex.Message}");
+                if (gotData)
+                    Console.WriteLine($"[!] {endpoint}: {ex.Message}");
             }
             finally
             {
                 client.Close();
-                Console.WriteLine($"[-] Auth disconnect {endpoint}");
+                if (gotData)
+                    Console.WriteLine($"[-] Auth disconnect {endpoint}");
             }
         }
 

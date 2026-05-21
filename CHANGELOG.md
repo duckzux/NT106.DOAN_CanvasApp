@@ -1,4 +1,50 @@
 
+# [2026-05-21] Fix — Room Stickiness Broken by Shared LB Socket; Add Routing Table
+
+Two clients joining the same room landed on different Canvas Servers and could not see each other's strokes. The "Connect-on-Join" rewrite from 2026-05-20 fixed the *direct-connect* hop but kept a persistent LB socket in the lobby, which silently re-introduced the original bug.
+
+## Root cause
+
+`LobbyForm.Load` opened a persistent `CanvasClient.Instance` connection to the LoadBalancer and sent `ROOM_LIST` first. The LB peeks only the **first** message on a connection to decide routing — `ROOM_LIST` is not room-bound, so it picked least-loaded. Every subsequent message on that same socket (including the `ROOM_JOIN` that *is* room-bound) just rode the existing proxy pipe; CRC32 affinity never got a chance to run. Two clients with different least-loaded picks at lobby-load time would end up on different Canvas Servers for the same room.
+
+Secondary issue: CRC32 routing is "sticky" only as long as the canvas server count stays constant. Restarting the LB or pulling a server out of the pool can re-key all rooms.
+
+## Fix
+
+1. **Explicit room routing table in LB** (`_roomRouting: ConcurrentDictionary<string, ServerInfo>`). First join for a room → least-loaded canvas, mapping is stored. Every subsequent join → same server. Server failure drops the mapping so the next join rebinds.
+2. **`ROOM_CREATE_RESULT` sniff in LB**. After forwarding the create, LB reads the response line, extracts the new room's `Id`, and pre-registers the binding so the very first remote join lands on the creator's server (no race between create and the first remote join).
+3. **Short-lived TCP for every lobby request**. New `LobbyClient` opens a fresh TCP to the LB per query (`GetRoomList`, `CreateRoom`, `JoinRoom`, `ResolveInviteCode`, `JoinRoomByCode`) so the LB sees that specific message type as the first one and routes correctly each time. The persistent `CanvasClient` is opened only *after* `ROOM_JOIN_RESULT` returns `ServerHost/ServerPort`, going straight to the chosen Canvas Server. LobbyForm no longer subscribes to `CanvasClient.OnMessageReceived` while in the lobby — refresh is now pull-based (`Shown` event + after-create + after-leave).
+
+## Changes
+
+- `CanvasApp.LoadBalancer/LoadBalancer.cs`: replaced CRC32 routing with a routing table; added `RegisterRoom`; intercept `ROOM_CREATE_RESULT` to claim the binding for the creating server.
+- `CanvasApp.Client/Network/LobbyClient.cs`: **new** — short-lived TCP request helper for the lobby.
+- `CanvasApp.Client/Forms/LobbyForm.cs`: rewritten — no persistent LB socket; uses `LobbyClient` for all lobby queries; opens `CanvasClient.Instance` only after `ROOM_JOIN_RESULT` arrives with the canvas address; refreshes room list on `Shown` and after `CanvasForm` closes.
+- `CanvasApp.Client/CanvasApp.Client.csproj`: register `Network/LobbyClient.cs`.
+
+## Verified flow
+
+```
+LoginForm   → AuthClient.LoginAsync :9001         (short-lived, token only)
+LobbyForm.Load → LobbyClient.GetRoomListAsync     (short-lived to LB)
+User Creates  → LobbyClient.CreateRoomAsync       (short-lived; LB sniffs result, registers mapping)
+              → LobbyClient.JoinRoomAsync         (short-lived; LB looks up table → same server)
+User Joins    → LobbyClient.JoinRoomAsync         (short-lived; LB looks up table → same server)
+              → ROOM_JOIN_RESULT { ServerHost, ServerPort }
+HandleJoinResult → CanvasClient.ConnectToServerAsync(ServerHost, ServerPort)  ← persistent
+                 → new CanvasForm (subscribes OnMessageReceived in ctor)
+                 → CanvasClient.JoinRoomAsync (ROOM_JOIN #2 on direct socket)
+Canvas Server  → registers user on direct connection, full room state intact
+CanvasForm closes → LobbyForm.Shown re-renders room list
+```
+
+## Trade-offs
+
+- Lobby no longer receives push updates for room user-counts. Refresh is on `Shown` and after explicit lobby actions. Acceptable; can be replaced with a long-poll endpoint if needed.
+- The first `ROOM_JOIN` (via LB) still produces a brief server-side join → leave → join sequence (as documented for the 2026-05-20 fix). Other clients see this; CanvasForm itself ignores the duplicate `ROOM_JOIN_RESULT` (state already applied by `SetRoom`).
+
+---
+
 # [2026-05-20] Fix — Connect-on-Join Pattern (Client Bypassing Load Balancer)
 
 Client was hard-coded to open a persistent TCP connection to `CANVAS_HOST:9002` immediately after login, bypassing the LoadBalancer entirely. Every client landed on the same Canvas Server regardless of which room they joined, defeating room affinity routing. The singleton `CanvasClient.Instance` could never switch to another server even when the LB wanted to redirect.

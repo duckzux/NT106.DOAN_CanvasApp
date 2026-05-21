@@ -121,7 +121,10 @@
     <Compile Include="AuthServer.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="OtpStore.cs" />
     <Compile Include="Services\AuthService.cs" />
+    <Compile Include="Services\OtpService.cs" />
+    <Compile Include="Services\SmtpEmailSender.cs" />
     <Compile Include="Services\TokenService.cs" />
     <Compile Include="Services\UserService.cs" />
     <Compile Include="UserStore.cs" />

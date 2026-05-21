@@ -16,11 +16,14 @@ namespace CanvasApp.AuthServer
     {
         private readonly AuthService _authService;
         private readonly UserService _userService;
+        private readonly OtpService _otpService;
 
-        public AuthHandler(UserStore store)
+        public AuthHandler(UserStore store, OtpStore otpStore)
         {
+            var mailer = new SmtpEmailSender();
+            _otpService = new OtpService(otpStore, mailer);
             _authService = new AuthService(store);
-            _userService = new UserService(store);
+            _userService = new UserService(store, _otpService);
         }
 
         public async Task HandleClientAsync(TcpClient client)
@@ -73,6 +76,15 @@ namespace CanvasApp.AuthServer
 
                     case MessageType.AUTH_REGISTER:
                         return _userService.Register(msg.GetData<RegisterRequest>());
+
+                    case MessageType.AUTH_SEND_OTP:
+                        return _otpService.SendOtp(msg.GetData<SendOtpRequest>());
+
+                    case MessageType.AUTH_FORGOT_SEND_OTP:
+                        return _userService.SendForgotPasswordOtp(msg.GetData<ForgotPasswordSendOtpRequest>());
+
+                    case MessageType.AUTH_RESET_PASSWORD:
+                        return _userService.ResetPassword(msg.GetData<ResetPasswordRequest>());
 
                     case MessageType.PING:
                         return new Message(MessageType.PONG);

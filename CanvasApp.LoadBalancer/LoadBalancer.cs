@@ -209,7 +209,8 @@ namespace CanvasApp.LoadBalancer
 
                 string type = msg?.Type ?? "";
 
-                if (type == MessageType.AUTH_LOGIN || type == MessageType.AUTH_REGISTER)
+                if (type == MessageType.AUTH_LOGIN || type == MessageType.AUTH_REGISTER || type == MessageType.AUTH_SEND_OTP
+                    || type == MessageType.AUTH_FORGOT_SEND_OTP || type == MessageType.AUTH_RESET_PASSWORD)
                 {
                     target = PickAuth();
                     if (target == null)

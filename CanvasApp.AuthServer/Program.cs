@@ -38,9 +38,11 @@ namespace CanvasApp.AuthServer
             try { Console.Title = $"AuthServer :{port}"; } catch { }
 
             UserStore store;
+            OtpStore otpStore;
             try
             {
                 store = new UserStore(connectionString);
+                otpStore = new OtpStore(connectionString);
             }
             catch (Exception ex)
             {
@@ -50,7 +52,7 @@ namespace CanvasApp.AuthServer
                 return;
             }
 
-            var server = new AuthServer(port, store);
+            var server = new AuthServer(port, store, otpStore);
             await server.StartAsync();
         }
     }

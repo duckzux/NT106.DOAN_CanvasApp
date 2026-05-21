@@ -26,6 +26,7 @@ namespace CanvasApp.Client
             this.btnLogin = new Guna.UI2.WinForms.Guna2Button();
             this.label4 = new System.Windows.Forms.Label();
             this.lbReg = new System.Windows.Forms.LinkLabel();
+            this.lbForgot = new System.Windows.Forms.LinkLabel();
             this.txtPassword = new CanvasApp.Client.loginTextbox();
             this.gradientPanel1 = new CanvasApp.Client.GradientPanel();
             this.label2 = new System.Windows.Forms.Label();
@@ -99,7 +100,7 @@ namespace CanvasApp.Client
             this.btnLogin.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
             this.btnLogin.Font = new System.Drawing.Font("Microsoft Sans Serif", 10.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.btnLogin.ForeColor = System.Drawing.Color.White;
-            this.btnLogin.Location = new System.Drawing.Point(751, 524);
+            this.btnLogin.Location = new System.Drawing.Point(751, 541);
             this.btnLogin.Name = "btnLogin";
             this.btnLogin.Size = new System.Drawing.Size(431, 54);
             this.btnLogin.TabIndex = 4;
@@ -131,6 +132,19 @@ namespace CanvasApp.Client
             this.lbReg.TabStop = true;
             this.lbReg.Text = "Đăng ký";
             this.lbReg.LinkClicked += new System.Windows.Forms.LinkLabelLinkClickedEventHandler(this.lbReg_LinkClicked);
+            // 
+            // lbForgot
+            // 
+            this.lbForgot.AutoSize = true;
+            this.lbForgot.Font = new System.Drawing.Font("Microsoft Sans Serif", 10.2F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.lbForgot.LinkColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
+            this.lbForgot.Location = new System.Drawing.Point(1055, 498);
+            this.lbForgot.Name = "lbForgot";
+            this.lbForgot.Size = new System.Drawing.Size(131, 20);
+            this.lbForgot.TabIndex = 7;
+            this.lbForgot.TabStop = true;
+            this.lbForgot.Text = "Quên mật khẩu?";
+            this.lbForgot.LinkClicked += new System.Windows.Forms.LinkLabelLinkClickedEventHandler(this.lbForgot_LinkClicked);
             // 
             // txtPassword
             // 
@@ -212,6 +226,7 @@ namespace CanvasApp.Client
             this.BackColor = System.Drawing.Color.White;
             this.ClientSize = new System.Drawing.Size(1280, 750);
             this.Controls.Add(this.pnlTopBar);
+            this.Controls.Add(this.lbForgot);
             this.Controls.Add(this.lbReg);
             this.Controls.Add(this.label4);
             this.Controls.Add(this.btnLogin);
@@ -250,6 +265,7 @@ namespace CanvasApp.Client
         private Guna.UI2.WinForms.Guna2Button btnLogin;
         private System.Windows.Forms.Label label4;
         private System.Windows.Forms.LinkLabel lbReg;
+        private System.Windows.Forms.LinkLabel lbForgot;
         private loginTextbox txtUsername;
     }
 }

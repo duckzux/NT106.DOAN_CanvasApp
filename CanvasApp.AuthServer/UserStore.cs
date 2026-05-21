@@ -244,6 +244,68 @@ namespace CanvasApp.AuthServer
             }
         }
 
+        /// <summary>
+        /// Look up a user by email (case-insensitive via the column's default collation).
+        /// Returns the basic profile (id + username) or null if no row matches.
+        /// </summary>
+        public User FindByEmail(string email)
+        {
+            if (string.IsNullOrWhiteSpace(email)) return null;
+            try
+            {
+                using (var conn = new MySqlConnection(_connectionString))
+                {
+                    conn.Open();
+                    var cmd = conn.CreateCommand();
+                    cmd.CommandText = @"SELECT id, username, email, avatar_color
+                                        FROM users WHERE email = @Email LIMIT 1";
+                    cmd.Parameters.AddWithValue("@Email", email);
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        if (!reader.Read()) return null;
+                        return new User
+                        {
+                            Id = reader.GetInt32("id"),
+                            Username = reader.GetString("username"),
+                            Email = reader.GetString("email"),
+                            AvatarColor = reader.GetString("avatar_color"),
+                        };
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UserStore] FindByEmail error: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Rewrites the password hash for the given user. Used by the forgot-password
+        /// flow after OTP verification succeeds. Returns true if exactly one row was updated.
+        /// </summary>
+        public bool UpdatePassword(int userId, string newPlainPassword)
+        {
+            if (userId <= 0 || string.IsNullOrEmpty(newPlainPassword)) return false;
+            try
+            {
+                using (var conn = new MySqlConnection(_connectionString))
+                {
+                    conn.Open();
+                    var cmd = conn.CreateCommand();
+                    cmd.CommandText = "UPDATE users SET password_hash=@Hash WHERE id=@Id";
+                    cmd.Parameters.AddWithValue("@Hash", BCrypt.Net.BCrypt.HashPassword(newPlainPassword, 12));
+                    cmd.Parameters.AddWithValue("@Id", userId);
+                    return cmd.ExecuteNonQuery() == 1;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[UserStore] UpdatePassword error: {ex.Message}");
+                return false;
+            }
+        }
+
         public static int VerifyToken(string token)
         {
             try

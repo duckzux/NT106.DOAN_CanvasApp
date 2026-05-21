@@ -26,6 +26,14 @@ namespace CanvasApp.Client
             this.Hide();
         }
 
+        private void lbForgot_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
+        {
+            using (var dlg = new ForgotPasswordForm())
+            {
+                dlg.ShowDialog(this);
+            }
+        }
+
         private async void btnLogin_Click_1(object sender, EventArgs e)
         {
             string username = txtUsername.TextValue;

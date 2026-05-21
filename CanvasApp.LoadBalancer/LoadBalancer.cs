@@ -31,12 +31,13 @@ namespace CanvasApp.LoadBalancer
         private int _authRR;
         private int _canvasRR;
 
-        // roomId → server that hosts (LB's belief, populated when LB routes ROOM_JOIN)
-        private readonly ConcurrentDictionary<string, ServerInfo> _roomRoutes =
-            new ConcurrentDictionary<string, ServerInfo>();
-        // roomId → active connections currently bound to that route
-        private readonly ConcurrentDictionary<string, int> _roomRefs =
-            new ConcurrentDictionary<string, int>();
+        // ── Room routing table ─────────────────────────────────────────────
+        // Sticky mapping: roomId → Canvas server currently hosting that room.
+        // First user to join a not-yet-mapped room picks the least-loaded canvas; every later
+        // joiner of the same room is steered to the same server so canvas state stays consistent.
+        // Mapping is also populated by sniffing ROOM_CREATE_RESULT so creators "claim" the server.
+        private readonly ConcurrentDictionary<string, ServerInfo> _roomRouting
+            = new ConcurrentDictionary<string, ServerInfo>(StringComparer.OrdinalIgnoreCase);
 
         public LoadBalancer(
             IEnumerable<ServerInfo> servers,
@@ -120,49 +121,65 @@ namespace CanvasApp.LoadBalancer
         }
 
         /// <summary>
-        /// Room-affinity routing: nếu roomId đã có trong table và server đó còn UP → reuse.
-        /// Nếu không → chọn Canvas least-loaded + ghi mapping mới + tăng RoomCount.
+        /// Room-affinity routing via an explicit table:
+        ///   1) If <paramref name="roomId"/> is already bound to a healthy server → return it.
+        ///   2) Otherwise pick the least-loaded canvas, store the mapping, return it.
+        /// Stickiness is what guarantees that every user joining the same room reaches the same
+        /// Canvas Server — that server's in-RAM <c>RoomManager</c> holds the canonical draw
+        /// actions and member list, so co-located clients can't drift out of sync.
         /// </summary>
         private ServerInfo RouteForRoom(string roomId)
         {
-            if (_roomRoutes.TryGetValue(roomId, out var existing) && existing.IsHealthy)
-                return existing;
+            if (string.IsNullOrEmpty(roomId)) return PickCanvasLeastLoaded();
 
-            var pick = PickCanvasLeastLoaded();
-            if (pick == null) return null;
-
-            if (_roomRoutes.TryAdd(roomId, pick))
+            // Sticky lookup
+            if (_roomRouting.TryGetValue(roomId, out var bound))
             {
-                pick.IncrementRoomCount();
-                Console.WriteLine($"[ROUTE] room {roomId} -> {pick.Endpoint} (rooms={pick.RoomCount})");
-            }
-            else
-            {
-                // someone won the race; reuse whatever's there now (if still healthy)
-                if (_roomRoutes.TryGetValue(roomId, out var raced) && raced.IsHealthy)
-                    pick = raced;
-            }
-            return pick;
-        }
-
-        private void RoomConnAcquired(string roomId)
-        {
-            _roomRefs.AddOrUpdate(roomId, 1, (k, v) => v + 1);
-        }
-
-        private void RoomConnReleased(string roomId)
-        {
-            int newCount = 1;
-            _roomRefs.AddOrUpdate(roomId, 0, (k, v) => { newCount = v - 1; return newCount < 0 ? 0 : newCount; });
-            if (newCount <= 0)
-            {
-                _roomRefs.TryRemove(roomId, out _);
-                if (_roomRoutes.TryRemove(roomId, out var srv))
+                if (bound.IsHealthy)
                 {
-                    srv.DecrementRoomCount();
-                    Console.WriteLine($"[ROUTE] room {roomId} freed from {srv.Endpoint} (rooms={srv.RoomCount})");
+                    Console.WriteLine($"[ROUTE] room {roomId} -> {bound.Endpoint} (sticky)");
+                    return bound;
                 }
+                // Bound server is down — drop the mapping so we can pick a fresh one
+                _roomRouting.TryRemove(roomId, out _);
+                Console.WriteLine($"[ROUTE] room {roomId} previous binding {bound.Endpoint} is DOWN; rebinding");
             }
+
+            var picked = PickCanvasLeastLoaded();
+            if (picked == null) return null;
+
+            // First writer wins — concurrent joins for a brand-new room all settle on one server
+            var actual = _roomRouting.GetOrAdd(roomId, picked);
+            // Only the writer that actually inserted the mapping should increment the counter
+            // (so concurrent losers don't double-count). ReferenceEquals because GetOrAdd
+            // returns the existing value if it lost the race.
+            if (ReferenceEquals(actual, picked))
+                actual.IncrementRoomCount();
+            Console.WriteLine($"[ROUTE] room {roomId} -> {actual.Endpoint} (newly bound, healthyCount={_canvasPool.Count(s => s.IsHealthy)})");
+            return actual;
+        }
+
+        /// <summary>
+        /// Register a room → server binding from outside the per-connection path. Used after
+        /// sniffing ROOM_CREATE_RESULT so the creator's server is locked in before the first
+        /// remote join arrives.
+        /// </summary>
+        private void RegisterRoom(string roomId, ServerInfo server)
+        {
+            if (string.IsNullOrEmpty(roomId) || server == null) return;
+            bool inserted = false;
+            _roomRouting.AddOrUpdate(
+                roomId,
+                _ => { inserted = true; return server; },
+                (key, existing) =>
+                {
+                    if (existing.IsHealthy) return existing;
+                    // Replacing an unhealthy mapping: decrement the dead one, increment fresh.
+                    existing.DecrementRoomCount();
+                    inserted = true;
+                    return server;
+                });
+            if (inserted) server.IncrementRoomCount();
         }
 
         // ── Per-connection proxy ──────────────────────────────────────────
@@ -219,9 +236,49 @@ namespace CanvasApp.LoadBalancer
                         return;
                     }
                 }
+                else if (type == MessageType.ROOM_RESOLVE)
+                {
+                    // Same affinity as ROOM_JOIN — the resolve must land on the server that
+                    // owns the room so the password check uses the canonical room metadata.
+                    var req = SafeGetData<ResolveRoomRequest>(msg);
+                    if (req != null && !string.IsNullOrEmpty(req.RoomId))
+                    {
+                        target = RouteForRoom(req.RoomId);
+                        boundRoomId = req.RoomId;
+                    }
+                    else
+                    {
+                        target = PickCanvasLeastLoaded();
+                    }
+                    if (target == null)
+                    {
+                        Console.WriteLine($"[LB] {clientEp} rejected — no healthy Canvas backend");
+                        return;
+                    }
+                }
+                else if (type == MessageType.ROOM_JOIN_BY_CODE)
+                {
+                    // If roomId is already resolved (from RESOLVE_INVITE_CODE), use room affinity
+                    var codeReq = SafeGetData<InviteCodeRequest>(msg);
+                    if (codeReq != null && !string.IsNullOrEmpty(codeReq.RoomId))
+                    {
+                        target = RouteForRoom(codeReq.RoomId);
+                        boundRoomId = codeReq.RoomId;
+                    }
+                    else
+                    {
+                        // Fallback: route to least-loaded (user hasn't called RESOLVE_INVITE_CODE first)
+                        target = PickCanvasLeastLoaded();
+                    }
+                    if (target == null)
+                    {
+                        Console.WriteLine($"[LB] {clientEp} rejected — no healthy Canvas backend");
+                        return;
+                    }
+                }
                 else
                 {
-                    // ROOM_LIST, ROOM_CREATE, ROOM_JOIN_BY_CODE, PING, malformed → Canvas
+                    // ROOM_LIST, ROOM_CREATE, RESOLVE_INVITE_CODE, PING, malformed → Canvas least-loaded
                     target = PickCanvasLeastLoaded();
                     if (target == null)
                     {
@@ -235,8 +292,6 @@ namespace CanvasApp.LoadBalancer
                     Console.WriteLine($"[LB] {clientEp} rejected — {target.Endpoint} at MaxConnections");
                     return;
                 }
-
-                if (boundRoomId != null) RoomConnAcquired(boundRoomId);
 
                 // 3) Open the backend socket.
                 backend = new TcpClient();
@@ -266,6 +321,41 @@ namespace CanvasApp.LoadBalancer
                 await backendStream.WriteAsync(firstBytes, 0, firstBytes.Length);
                 await backendStream.FlushAsync();
 
+                // ✅ For ROOM_CREATE we intercept the first response line to learn the new
+                // room's Id, then register the routing mapping immediately. Without this,
+                // a subsequent ROOM_JOIN for the freshly-created room could land on a
+                // different server (least-loaded) before any user "claims" the binding.
+                if (type == MessageType.ROOM_CREATE)
+                {
+                    try
+                    {
+                        var responseLine = await ReadOneLineAsync(backendStream, _peekMaxBytes, 10_000);
+                        if (!string.IsNullOrEmpty(responseLine))
+                        {
+                            try
+                            {
+                                var respMsg = Message.FromJson(responseLine);
+                                if (respMsg?.Type == MessageType.ROOM_CREATE_RESULT)
+                                {
+                                    var newRoom = SafeGetData<Room>(respMsg);
+                                    if (newRoom != null && !string.IsNullOrEmpty(newRoom.Id))
+                                    {
+                                        RegisterRoom(newRoom.Id, target);
+                                        Console.WriteLine($"[ROUTE] claim on create: {newRoom.Id} -> {target.Endpoint}");
+                                    }
+                                }
+                            }
+                            catch { /* unparseable — just forward */ }
+
+                            var respBytes = Encoding.UTF8.GetBytes(responseLine + "\n");
+                            await clientStream.WriteAsync(respBytes, 0, respBytes.Length);
+                            await clientStream.FlushAsync();
+                        }
+                    }
+                    catch (TimeoutException) { Console.WriteLine($"[LB] {clientEp} ROOM_CREATE_RESULT timeout"); }
+                    catch (Exception ex) { Console.WriteLine($"[LB] {clientEp} sniff error: {ex.Message}"); }
+                }
+
                 var c2s = PumpAsync(client, backend, _bufferSize);
                 var s2c = PumpAsync(backend, client, _bufferSize);
                 await Task.WhenAny(c2s, s2c);
@@ -281,7 +371,6 @@ namespace CanvasApp.LoadBalancer
                 if (target != null)
                 {
                     target.ReleaseConnection();
-                    if (boundRoomId != null) RoomConnReleased(boundRoomId);
                     Console.WriteLine($"[LB] {clientEp} closed (backend {target.Endpoint} conns={target.ActiveConnections})");
                 }
             }
@@ -329,12 +418,19 @@ namespace CanvasApp.LoadBalancer
                 if (done != readTask) throw new TimeoutException();
 
                 int n = await readTask;
-                if (n == 0) return buf.Count == 0 ? null : Encoding.UTF8.GetString(buf.ToArray());
+                if (n == 0) return buf.Count == 0 ? null : StripBom(Encoding.UTF8.GetString(buf.ToArray()));
                 if (one[0] == (byte)'\n') break;
                 if (one[0] != (byte)'\r') buf.Add(one[0]);
             }
-            return Encoding.UTF8.GetString(buf.ToArray());
+            return StripBom(Encoding.UTF8.GetString(buf.ToArray()));
         }
+
+        // Clients open StreamWriter(stream, Encoding.UTF8) which emits a UTF-8 BOM on the first write.
+        // StreamReader-based backends strip it automatically, but our byte-level peek does not — without
+        // this, the BOM makes the first JSON unparseable and routing falls through to the Canvas default.
+        private const char Utf8Bom = '﻿';
+        private static string StripBom(string s) =>
+            !string.IsNullOrEmpty(s) && s[0] == Utf8Bom ? s.Substring(1) : s;
 
         private static T SafeGetData<T>(Message msg) where T : class
         {

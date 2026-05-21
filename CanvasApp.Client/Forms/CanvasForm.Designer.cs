@@ -72,6 +72,7 @@ namespace CanvasApp.Client
             this.btnRectangle = new System.Windows.Forms.ToolStripButton();
             this.btnCircle = new System.Windows.Forms.ToolStripButton();
             this.btnLine = new System.Windows.Forms.ToolStripButton();
+            this.btnTriangle = new System.Windows.Forms.ToolStripButton();
             this.btnArrow = new System.Windows.Forms.ToolStripButton();
             this.btnText = new System.Windows.Forms.ToolStripButton();
             this.btnColor = new System.Windows.Forms.ToolStripButton();
@@ -560,6 +561,18 @@ namespace CanvasApp.Client
             this.btnLine.Size = new System.Drawing.Size(43, 34);
             this.btnLine.Text = "Đường thẳng";
             // 
+            // btnTriangle
+            // 
+            this.btnTriangle.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Text;
+            this.btnTriangle.Font = new System.Drawing.Font("Segoe UI", 16F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.btnTriangle.ImageTransparentColor = System.Drawing.Color.Magenta;
+            this.btnTriangle.Name = "btnTriangle";
+            this.btnTriangle.Padding = new System.Windows.Forms.Padding(3);
+            this.btnTriangle.Size = new System.Drawing.Size(43, 47);
+            this.btnTriangle.Text = "△";
+            this.btnTriangle.ToolTipText = "Hình tam giác";
+            this.btnTriangle.Click += new System.EventHandler(this.btnTriangle_Click);
+            // 
             // btnArrow
             // 
             this.btnArrow.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
@@ -653,6 +666,7 @@ namespace CanvasApp.Client
             this.btnRectangle,
             this.btnCircle,
             this.btnLine,
+            this.btnTriangle,
             this.btnArrow,
             this.btnText,
             this.btnColor,
@@ -766,6 +780,7 @@ namespace CanvasApp.Client
         private System.Windows.Forms.ToolStripButton btnRectangle;
         private System.Windows.Forms.ToolStripButton btnCircle;
         private System.Windows.Forms.ToolStripButton btnLine;
+        private System.Windows.Forms.ToolStripButton btnTriangle;
         private System.Windows.Forms.ToolStripButton btnArrow;
         private System.Windows.Forms.ToolStripButton btnText;
         private System.Windows.Forms.ToolStripButton btnColor;

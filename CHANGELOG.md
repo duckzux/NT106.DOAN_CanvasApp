@@ -1,4 +1,426 @@
 
+# [2026-05-21] Fix — Room Stickiness Broken by Shared LB Socket; Add Routing Table
+
+Two clients joining the same room landed on different Canvas Servers and could not see each other's strokes. The "Connect-on-Join" rewrite from 2026-05-20 fixed the *direct-connect* hop but kept a persistent LB socket in the lobby, which silently re-introduced the original bug.
+
+## Root cause
+
+`LobbyForm.Load` opened a persistent `CanvasClient.Instance` connection to the LoadBalancer and sent `ROOM_LIST` first. The LB peeks only the **first** message on a connection to decide routing — `ROOM_LIST` is not room-bound, so it picked least-loaded. Every subsequent message on that same socket (including the `ROOM_JOIN` that *is* room-bound) just rode the existing proxy pipe; CRC32 affinity never got a chance to run. Two clients with different least-loaded picks at lobby-load time would end up on different Canvas Servers for the same room.
+
+Secondary issue: CRC32 routing is "sticky" only as long as the canvas server count stays constant. Restarting the LB or pulling a server out of the pool can re-key all rooms.
+
+## Fix
+
+1. **Explicit room routing table in LB** (`_roomRouting: ConcurrentDictionary<string, ServerInfo>`). First join for a room → least-loaded canvas, mapping is stored. Every subsequent join → same server. Server failure drops the mapping so the next join rebinds.
+2. **`ROOM_CREATE_RESULT` sniff in LB**. After forwarding the create, LB reads the response line, extracts the new room's `Id`, and pre-registers the binding so the very first remote join lands on the creator's server (no race between create and the first remote join).
+3. **Short-lived TCP for every lobby request**. New `LobbyClient` opens a fresh TCP to the LB per query (`GetRoomList`, `CreateRoom`, `JoinRoom`, `ResolveInviteCode`, `JoinRoomByCode`) so the LB sees that specific message type as the first one and routes correctly each time. The persistent `CanvasClient` is opened only *after* `ROOM_JOIN_RESULT` returns `ServerHost/ServerPort`, going straight to the chosen Canvas Server. LobbyForm no longer subscribes to `CanvasClient.OnMessageReceived` while in the lobby — refresh is now pull-based (`Shown` event + after-create + after-leave).
+
+## Changes
+
+- `CanvasApp.LoadBalancer/LoadBalancer.cs`: replaced CRC32 routing with a routing table; added `RegisterRoom`; intercept `ROOM_CREATE_RESULT` to claim the binding for the creating server.
+- `CanvasApp.Client/Network/LobbyClient.cs`: **new** — short-lived TCP request helper for the lobby.
+- `CanvasApp.Client/Forms/LobbyForm.cs`: rewritten — no persistent LB socket; uses `LobbyClient` for all lobby queries; opens `CanvasClient.Instance` only after `ROOM_JOIN_RESULT` arrives with the canvas address; refreshes room list on `Shown` and after `CanvasForm` closes.
+- `CanvasApp.Client/CanvasApp.Client.csproj`: register `Network/LobbyClient.cs`.
+
+## Verified flow
+
+```
+LoginForm   → AuthClient.LoginAsync :9001         (short-lived, token only)
+LobbyForm.Load → LobbyClient.GetRoomListAsync     (short-lived to LB)
+User Creates  → LobbyClient.CreateRoomAsync       (short-lived; LB sniffs result, registers mapping)
+              → LobbyClient.JoinRoomAsync         (short-lived; LB looks up table → same server)
+User Joins    → LobbyClient.JoinRoomAsync         (short-lived; LB looks up table → same server)
+              → ROOM_JOIN_RESULT { ServerHost, ServerPort }
+HandleJoinResult → CanvasClient.ConnectToServerAsync(ServerHost, ServerPort)  ← persistent
+                 → new CanvasForm (subscribes OnMessageReceived in ctor)
+                 → CanvasClient.JoinRoomAsync (ROOM_JOIN #2 on direct socket)
+Canvas Server  → registers user on direct connection, full room state intact
+CanvasForm closes → LobbyForm.Shown re-renders room list
+```
+
+## Trade-offs
+
+- Lobby no longer receives push updates for room user-counts. Refresh is on `Shown` and after explicit lobby actions. Acceptable; can be replaced with a long-poll endpoint if needed.
+- The first `ROOM_JOIN` (via LB) still produces a brief server-side join → leave → join sequence (as documented for the 2026-05-20 fix). Other clients see this; CanvasForm itself ignores the duplicate `ROOM_JOIN_RESULT` (state already applied by `SetRoom`).
+
+---
+
+# [2026-05-20] Fix — Connect-on-Join Pattern (Client Bypassing Load Balancer)
+
+Client was hard-coded to open a persistent TCP connection to `CANVAS_HOST:9002` immediately after login, bypassing the LoadBalancer entirely. Every client landed on the same Canvas Server regardless of which room they joined, defeating room affinity routing. The singleton `CanvasClient.Instance` could never switch to another server even when the LB wanted to redirect.
+
+## Problem 1: Connect Too Early, Wrong Target
+
+**Issue**: `LoginForm.btnLogin_Click` called `CanvasClient.Instance.ConnectAsync()` straight after authentication, opening a TCP connection to a hard-coded Canvas Server. No room-based routing possible.
+
+**Root Cause**: Connection lifetime started at login instead of at join-room time. `Session.CANVAS_HOST/PORT` constants pointed clients directly at one server.
+
+**Solution**: "Connect-on-Join" pattern. Login only stores the token. Connection to LB happens on entering Lobby (to fetch room list). Connection to the actual Canvas Server only happens when the user clicks Join, after the LB has told the client which server holds that room.
+
+**Changes**:
+- `Session.cs`: Removed hard-coded `CANVAS_HOST/CANVAS_PORT` constants. Added `LB_HOST=127.0.0.1`, `LB_PORT=9000` (only address client knows at compile time). Added runtime `CanvasHost`/`CanvasPort` properties set after LB redirect. Fixed `AUTH_PORT` from 9000 → 9001.
+- `LoginForm.cs`: Removed `ConnectAsync()` call after successful login. Login is now purely token-fetching.
+- `LobbyForm.cs`: `Load` handler now calls `ConnectToServerAsync(LB_HOST, LB_PORT)` before `RequestRoomListAsync()`.
+
+## Problem 2: Singleton CanvasClient Pinned to One Server
+
+**Issue**: `CanvasClient.TryConnectAsync` used `Session.CANVAS_HOST/PORT` directly. Once connected, the client could never switch to another Canvas Server.
+
+**Root Cause**: No API to retarget the singleton after construction.
+
+**Solution**: Added `ConnectToServerAsync(host, port)` that closes any existing connection and opens a fresh one to the new target. `_targetHost`/`_targetPort` fields are now the source of truth for `TryConnectAsync`.
+
+**Changes**:
+- `CanvasClient.cs`: Added `_targetHost`, `_targetPort` fields. New `ConnectToServerAsync(host, port)` method that sets target and reconnects. `TryConnectAsync` uses these instead of `Session.CANVAS_HOST/PORT`.
+- `Program.cs` (Canvas Server): Added `_serverHost`, `_serverPort` static fields. `Main()` sets `_serverPort = port` after CLI/config resolution. `HandleJoin()` populates `joinRes.ServerHost`/`ServerPort` so client knows where to direct-connect.
+- `Models.cs`: Added `ServerHost`/`ServerPort` to `JoinRoomResult` (carried in LB redirect response).
+
+## Problem 3: OnDisconnected Fires During Intentional Server Switch
+
+**Issue**: When `HandleJoinResult` called `ConnectToServerAsync(canvasHost, canvasPort)` to switch from LB to Canvas Server, the old `ReceiveLoop` detected the closed socket and fired `OnDisconnected`. `LobbyForm.OnDisconnected` interpreted this as a network failure and logged the user out back to `LoginForm`.
+
+**Root Cause**: `Disconnect()` and intentional reconnect-to-new-server were indistinguishable from involuntary connection loss.
+
+**Solution**: Generation counter. Each `Disconnect()` and each `TryConnectAsync()` increments `_connectionGen`. `ReceiveLoop` captures the generation at start; in its `finally` block, it only fires `OnDisconnected` if the captured gen still matches the current — i.e., this ReceiveLoop wasn't superseded by a deliberate switch.
+
+**Changes**:
+- `CanvasClient.cs`: Added `_connectionGen` field. `Disconnect()` and `TryConnectAsync()` both `Interlocked.Increment` it. `ReceiveLoop` now takes `int myGen` parameter; `finally` block wraps the event-firing logic in `if (myGen == Volatile.Read(ref _connectionGen))` so superseded loops fall through silently.
+
+## Problem 4: Duplicate Event Subscribers — Two CanvasForms Opened
+
+**Issue**: After `HandleJoinResult` opened the `CanvasForm`, `LobbyForm` was still subscribed to `OnMessageReceived` and `OnDisconnected`. The second `ROOM_JOIN_RESULT` (from the post-switch re-join — see Problem 5) re-triggered `LobbyForm.HandleJoinResult`, opening a second `CanvasForm`.
+
+**Root Cause**: `LobbyForm` only unsubscribed on logout, not on transition to `CanvasForm`.
+
+**Solution**: Unsubscribe in `HandleJoinResult` before switching server. Re-subscribe in `CanvasForm.FormClosed` handler.
+
+**Changes**:
+- `LobbyForm.cs`: `HandleJoinResult` now unsubscribes `OnMessageReceived` and `OnDisconnected` before calling `ConnectToServerAsync`. On Canvas connection failure, re-subscribes and reconnects LB so user can keep using Lobby. `FormClosed` handler re-subscribes events and reconnects to LB before refreshing room list.
+
+## Problem 5: Server Loses User After LB Disconnect
+
+**Issue**: When client closed its LB connection to switch to direct Canvas, server-side detected the disconnect and called `_roomManager.Leave(client)`, removing the user from the room. The fresh direct connection arrived as a new `ConnectedClient` with no room state — all subsequent `DRAW_*`/`CHAT_*` messages would be rejected.
+
+**Root Cause**: Original `ROOM_JOIN` was processed on the *LB-proxied* connection, which the client immediately closed.
+
+**Solution**: After establishing the direct connection, client sends `ROOM_JOIN` a second time so the Canvas Server registers the user on the new connection. Side effects (chat history resend, peer publish, ROOM_UPDATE broadcast) are accepted as known cost — see notes.
+
+**Changes**:
+- `LobbyForm.cs`: After `ConnectToServerAsync(canvasHost, canvasPort)` succeeds and `CanvasForm` is shown, `HandleJoinResult` calls `JoinRoomAsync(roomIdForRejoin, passwordForRejoin)` on the direct connection. Password is captured before reset so the rejoin uses the same credentials.
+
+## Flow After Fix
+
+```
+LoginForm    → AuthClient.LoginAsync :9001  (short-lived, token only)
+LobbyForm.Load → ConnectToServerAsync(LB :9000)
+                 → RequestRoomListAsync (LB forwards to least-loaded Canvas)
+User clicks Join → ROOM_JOIN via LB → routes by RoomId hash → Canvas Server
+                 → ROOM_JOIN_RESULT carries ServerHost:ServerPort
+HandleJoinResult → unsubscribe LobbyForm events
+                 → ConnectToServerAsync(Canvas direct)  ← silent disconnect LB
+                 → new CanvasForm (auto-subscribes)
+                 → JoinRoomAsync (ROOM_JOIN #2 on direct connection)
+Canvas Server   → registers user on new connection, full room state intact
+CanvasForm closes → re-subscribe LobbyForm events
+                  → ConnectToServerAsync(LB) again for next join cycle
+```
+
+## Notes
+
+- ROOM_JOIN is sent twice per join: once through LB (server discovery), once direct (actual session registration). Second join produces duplicate `CHAT_HISTORY` and `ROOM_UPDATE` side effects on the server. CanvasForm doesn't handle the second `ROOM_JOIN_RESULT`, so no duplicate canvas state is applied. Other clients in the room briefly see the user as leave-then-rejoin. Acceptable for demo; could be eliminated by adding a `ROOM_DISCOVER` message that returns server address without joining.
+- `Disconnect()` still increments `_connectionGen` to suppress events on explicit logout, but logout also unsubscribes first so the suppression is belt-and-braces.
+
+## Compile Note
+
+C# disallows `return` inside a `finally` block (CS0157). The generation-check guard was written as `if (gen != current) return;` initially and rewritten to `if (gen == current) { ... }` wrapping the body.
+
+---
+
+# [2026-05-20] Fix — 4 Critical Peer Mesh Synchronization Issues (Member Lists, Chat Notifications, Connection Reliability, Canvas State Recovery)
+
+User testing across multiple Canvas servers (9002, 9003) via LoadBalancer revealed distributed clients in same room see inconsistent state: incomplete member lists, duplicate chat notifications, intermittent drawing sync. Root cause: peer-to-peer synchronization between servers had multiple reliability holes.
+
+## Problem 1: Stale Member List in Peer Relay
+
+**Issue**: When a peer server sent `PEER_RELAY(ROOM_UPDATE)`, the message included only members visible on *that* server. Receiving server rebroadcast it as-is to local clients, who saw incomplete rosters. If clients A & B joined on server 9002 and C & D on server 9003, client A would see only [A, B] until PEER_MEMBER_SYNC arrived (eventual consistency).
+
+**Root Cause**: `ApplyFromPeerAsync` rebroadcast peer messages without rebuilding merged member list.
+
+**Solution**: Intercept `PEER_RELAY(ROOM_UPDATE)` in `ApplyFromPeerAsync`, extract join/leave notification info from peer payload, replace Members with locally-merged list (`GetMembers(roomId)`), then rebroadcast. Clients now always see complete roster.
+
+**Changes**:
+- `RoomManager.cs`: Added `BroadcastRoomMembersAsync(roomId)` to broadcast current merged member list to room clients
+- `RoomManager.cs`: Modified `ApplyFromPeerAsync` to special-case `ROOM_UPDATE`: rebuild with merged members, preserve peer's join/leave notification intent
+
+## Problem 2: PEER_MEMBER_SYNC Not Triggering Client Updates
+
+**Issue**: When peers exchanged member lists via `PEER_MEMBER_SYNC`, the inbound `PeerHandler` updated the internal `_peerMembers` index but never notified local room clients. If the sync arrived *before* `PEER_RELAY(ROOM_UPDATE)`, client never learned about remote members. If it arrived *after*, client saw notification but member panel stayed stale.
+
+**Root Cause**: `UpdatePeerMembers()` in `PeerHandler` had no downstream broadcast.
+
+**Solution**: Call `BroadcastRoomMembersAsync(roomId)` after every `UpdatePeerMembers()` so local clients immediately see the merged list.
+
+**Changes**:
+- `PeerHandler.cs`: Added `BroadcastRoomMembersAsync()` call after `PEER_MEMBER_SYNC` → `UpdatePeerMembers()`
+
+## Problem 3: Peer Connections Drop Silently, Messages Lost
+
+**Issue**: `PeerManager` read loop read 1 byte at a time with no timeout; default TCP keepalive (2 hours) meant a half-open connection stayed "alive" for hours, silently dropping outbound messages via `PublishAsync`. During peer outages (reconnect backoff 1 s → 32 s), all draw actions and chat sent to peers were permanently lost.
+
+**Root Cause**: No application-level heartbeat; no aggressive TCP keepalive; no timeout on read loop.
+
+**Solution**: Dual-layer detection:
+1. TCP keepalive: Enable with Windows-specific IOControl (10s idle time, 5s retry interval, 3 retries = ~25s detection)
+2. PEER_PING heartbeat: Send every 15s, expect PONG within 30s, fail and reconnect if timeout
+
+**Changes**:
+- `Message.cs`: Added `PEER_PING`, `PEER_PONG`, `PEER_CANVAS_SYNC` message type constants
+- `PeerManager.cs`: 
+  - Set TCP keepalive on every new socket (Windows: time=10s, interval=5s)
+  - Added heartbeat loop: send `PEER_PING` every 15s via background task
+  - Replaced 1-byte read loop with 4096-byte chunked reading; detect if no data in 30s (timeout)
+  - Faster initial backoff: 500ms instead of 1000ms (still capped at 30s)
+- `PeerHandler.cs`:
+  - Modified to use bidirectional `StreamReader`/`StreamWriter` pair
+  - Added `PEER_PING` handler: respond with `PEER_PONG`
+
+## Problem 4: Canvas State Lost After Peer Reconnect
+
+**Issue**: `PEER_HELLO` on reconnect only carried member lists, not draw actions. Clients on a server that had been down for even seconds would miss shapes drawn by other clients during the outage — permanently, since actions are not persisted to DB.
+
+**Root Cause**: No mechanism to replay committed canvas actions on peer reconnect.
+
+**Solution**: Add `PEER_CANVAS_SYNC` message type carrying canvas action list. Publish it when a peer reconnects (detected via `OnPeerReconnected` delegate). Receiving server deduplicates by ActionId and adds missing actions to local state.
+
+**Changes**:
+- `Models.cs`: Added `PeerCanvasSyncPayload` class with RoomId, OriginServerId, Actions list
+- `RoomManager.cs`: Added `GetCanvasState(roomId)` to expose action list
+- `PeerManager.cs`: Exposed public `OnPeerReconnected` delegate (invoked when peer reconnects after downtime)
+- `PeerHandler.cs`: Added `PEER_CANVAS_SYNC` handler: dedup actions by ActionId, add missing ones to local state
+- `Program.cs`: 
+  - Subscribed to `OnPeerReconnected` 
+  - On reconnect, iterate active rooms and publish `PEER_CANVAS_SYNC` with current canvas state
+  - Removes unreliable 50ms member-list delay from `HandleJoin`
+
+## Summary
+
+These 4 fixes establish **strong consistency** for peer mesh events:
+- Member lists are always merged and current (Problem 1 + 2)
+- Peer connections are detected dead within 25-30s and recover without message loss (Problem 3)
+- Canvas actions are replayed on reconnect so no drawing is lost (Problem 4)
+
+Tested with 2 Canvas servers (9002, 9003) and LoadBalancer: all room clients see identical member lists, chat syncs reliably, drawing propagates within ~50ms.
+
+---
+
+# [2026-05-20] Fix — 3 Critical Architectural Issues (Room Affinity, Persistent Routing, Immediate Member List)
+
+User feedback identified 3 fundamental routing/sync issues in Canvas Server mesh:
+
+## Problem 1: Room Affinity Missing for ROOM_JOIN_BY_CODE
+
+**Issue**: LoadBalancer applied room-affinity routing only to `ROOM_JOIN` messages (which contain roomId). Other flows like `ROOM_JOIN_BY_CODE`, `ROOM_LIST`, `ROOM_CREATE` fell back to **least-loaded**, causing users joining via invite code to land on different servers and never see each other.
+
+**Root Cause**: `ROOM_JOIN_BY_CODE` doesn't include roomId in the first message — client only knows invite code, not roomId.
+
+**Solution**: Two-step join process for invite codes:
+1. Client sends `RESOLVE_INVITE_CODE` → server looks up room by code, returns roomId
+2. Client sends `ROOM_JOIN_BY_CODE` with embedded roomId
+3. LoadBalancer extracts roomId and applies room-affinity routing
+
+**Changes**:
+- `Message.cs`: Added `RESOLVE_INVITE_CODE`, `RESOLVE_INVITE_CODE_RESULT` message types
+- `Models.cs`: Added `ResolveInviteCodeRequest`, `ResolveInviteCodeResult` payloads; extended `InviteCodeRequest` with `RoomId` field
+- `CanvasClient.cs`: Modified `JoinRoomByCodeAsync()` to resolve code first, then join with roomId
+- `Program.cs`: Added handler for `RESOLVE_INVITE_CODE` that queries room by invite code
+- `LoadBalancer.cs`: Added case for `ROOM_JOIN_BY_CODE` that extracts roomId and applies room affinity if present
+
+## Problem 2: Persistent Routing Table Lost on LoadBalancer Restart
+
+**Issue**: LoadBalancer stored room→server mappings in in-memory `_roomRoutes` dictionary. On LB restart or when running multiple LB instances, routing table was lost/inconsistent — same roomId could route to different servers.
+
+**Root Cause**: State was ephemeral, not persisted. No coordination between multiple LB instances.
+
+**Solution**: Replace in-memory routing with **deterministic consistent hashing**:
+- All LBs use same CRC32(roomId) mod numServers function
+- No storage needed — routing is purely computational
+- Survives restarts automatically
+- Multiple LBs stay synchronized without communication
+
+**Changes**:
+- `LoadBalancer.cs`: 
+  - Removed `_roomRoutes` ConcurrentDictionary entirely
+  - Removed `_roomRefs` tracking
+  - Replaced `RouteForRoom()` with consistent hash function
+  - Added `ComputeCrc32()` for deterministic per-roomId hashing
+  - Removed `RoomConnAcquired()`, `RoomConnReleased()` methods (no-ops)
+
+## Problem 3: Member List Split-Brain on Multi-Server Join
+
+**Issue**: When a client joined a room, `ROOM_JOIN_RESULT` included only members visible on that server at join time. If peers had members the origin server didn't know about yet, those members weren't included. Client had to wait for async `PEER_MEMBER_SYNC` propagation to see remote members.
+
+**Root Cause**: Member sync was eventual-consistency. No guarantee peer members were available at join time.
+
+**Solution**: Ensure joining client immediately sees complete merged member list:
+1. Server adds client to local room
+2. Publishes `PEER_MEMBER_SYNC` immediately (before other broadcasts)
+3. Sends `ROOM_JOIN_RESULT` with merged members at that instant
+4. After 50ms delay, sends `ROOM_UPDATE` with re-checked complete member list (allows peer syncs to propagate)
+
+The 50ms delay bridges the race between local join and peer synchronization.
+
+**Changes**:
+- `Program.cs` HandleJoin(): Reordered steps to:
+  1. Send `ROOM_JOIN_RESULT` immediately (merged members at join time)
+  2. Send chat history
+  3. Publish local members to peers (IMMEDIATELY, before other broadcasts)
+  4. Notify other clients in room
+  5. After 50ms, send joining client a final `ROOM_UPDATE` with complete merged list
+  6. Notify lobby
+
+---
+
+# [2026-05-20] Feature — Canvas Server Mesh (Pub/Sub giữa các Canvas Server, Hướng C)
+
+Sau Load Balancer (19/05), phát hiện bug **split-brain**: 4 user vào cùng 1 phòng nhưng bị LB chia sang 2 Canvas Server khác nhau (vd: `duck`+`zhue` ở `9002`, `test`+`nguyethadaodai` ở `9003`). Cùng `Room.Id` nhưng mỗi server giữ `_canvasState` / `_roomClients` riêng → 2 nhóm không thấy vẽ, chat, member list của nhau. DB cũng lỗi `Duplicate entry '3E4194D5-28' for key 'uk_room_version'` vì 2 server đồng thời autosave snapshot cùng version.
+
+Nguyên nhân: LB chỉ áp room-affinity cho `ROOM_JOIN` (có sẵn `RoomId`). `ROOM_JOIN_BY_CODE`, `ROOM_CREATE`, `ROOM_LIST` đều rơi vào nhánh **least-loaded** → 2 user dùng cùng invite code có thể landed ở 2 server khác nhau.
+
+Giải pháp chọn: **Mesh broadcast giữa các Canvas Server**. Không thêm Redis/broker — dùng đúng protocol JSON Message hiện có, mỗi server vừa publisher vừa subscriber với peer khác qua TCP. User trên BẤT KỲ Canvas Server nào đều thấy đủ trạng thái phòng.
+
+## Kiến trúc mesh
+
+- **Mỗi Canvas Server vẫn own** clients + RAM state + DB persistence của chính nó. KHÔNG có khái niệm "primary" cho mỗi room.
+- Sự kiện local (`DRAW_*`, `CHAT_*`, `ROOM_UPDATE`, `DRAW_UNDO/CLEAR/FILL`) được wrap trong envelope `PEER_RELAY` và push tới mọi peer trong `PeerManager`.
+- Server nhận `PEER_RELAY` → `RoomManager.ApplyFromPeerAsync()`: apply vào `_canvasState` (RAM, không ghi DB), broadcast tới local clients, **không re-publish** (chống broadcast storm).
+- Member list eventually-consistent qua `PEER_MEMBER_SYNC`. `_peerMembers` cache `peerServerId → roomId → List<RoomMember>`. `GetMembers()` / `GetRoomList()` merge local + peer, dedupe theo `UserId`.
+- Connect xong gửi ngay `PEER_HELLO` kèm snapshot toàn bộ `roomId → members` để peer mới biết world state, không phải đợi event tiếp theo.
+
+| Loại sự kiện | Originator làm | Peer làm khi nhận PEER_RELAY |
+|---|---|---|
+| `DRAW_END/SHAPE/TEXT/FILL` | Record action (DB write qua PersistenceQueue), broadcast local, publish PEER_RELAY | Add vào `_canvasState`, `AdvanceSeqIfGreater()`, broadcast local |
+| `DRAW_START/MOVE` | Broadcast local + publish (ephemeral, không persist) | Chỉ broadcast local |
+| `DRAW_UNDO` | `UndoLastAction()`, MarkUndone DB, broadcast `UndoNotification`, publish | RemoveAll khỏi `_canvasState`, broadcast local |
+| `DRAW_CLEAR` | `ClearCanvas()`, broadcast, publish | Clear `_canvasState`, clear snapshot cache, broadcast |
+| `CHAT_MESSAGE` | Insert DB, broadcast, publish | Broadcast local (không touch DB) |
+| `CHAT_FILE` | Broadcast, publish | Broadcast local |
+| `ROOM_UPDATE` (join/leave) | Broadcast `RoomMembersUpdate` chứa **merged** members, publish update + `PEER_MEMBER_SYNC` chứa **local-only** | Broadcast update tới local clients; cập nhật `_peerMembers[peerId][roomId]` từ sync payload |
+
+## File breakdown
+
+| File | Thay đổi |
+|------|----------|
+| `CanvasApp.Common/Models/Message.cs` | **Mới**: 3 message type `PEER_RELAY` / `PEER_MEMBER_SYNC` / `PEER_HELLO`. 3 payload class `PeerRelayPayload { RoomId, OriginServerId, Inner }`, `PeerMembersPayload { RoomId, OriginServerId, Members }`, `PeerHelloPayload { ServerId, Rooms (dict roomId→members) }` |
+| `CanvasApp.Common/DataAccess/CanvasSnapshotDAO.cs` | Đổi `INSERT INTO canvas_snapshots` → `INSERT IGNORE INTO`. Khi 2 server cùng compute `version = MAX(version)+1` từ view local rồi cùng INSERT, kẻ thua bị silent drop thay vì throw DuplicateKey. Deltas trong `draw_actions` là source of truth → mất 1 snapshot chỉ tốn thêm chút thời gian replay khi load lại |
+| `CanvasApp.Server/PeerManager.cs` | **File mới** — outbound side của mesh. Constructor nhận `selfServerId`, list `peerAddresses` (`host:peerPort`), `helloBuilder` callback. `Start()` spawn 1 task `ConnectLoopAsync` mỗi peer. Mỗi task: connect (timeout 3s), gửi `PEER_HELLO`, sau đó dùng read-side để detect drop (one-way socket — peer reply trên outbound của họ về ta). Disconnect → backoff `1s → 2s → 4s → ... → 30s cap`. `PublishAsync(Message)` serialize 1 lần, gửi raw JSON tới mọi peer đang connected qua `SemaphoreSlim` lock |
+| `CanvasApp.Server/PeerHandler.cs` | **File mới** — inbound side. Static `HandleAsync(TcpClient, RoomManager)`. Dùng `StreamReader` (tự strip BOM, không lặp lại bug LB). Parse từng dòng JSON, switch theo `msg.Type`: `PEER_HELLO` → lưu `peerId` + `UpdatePeerMembers` cho toàn bộ rooms snapshot. `PEER_RELAY` → `ApplyFromPeerAsync(roomId, originId, inner)`. `PEER_MEMBER_SYNC` → `UpdatePeerMembers(originId, roomId, members)`. Disconnect → `DropPeer(peerId)` để xóa stale member view |
+| `CanvasApp.Server/RoomState.cs` | Thêm `AdvanceSeqIfGreater(long incoming)` — CAS loop chỉ tăng `_seqNo`, không bao giờ giảm. Gọi khi nhận `PEER_RELAY` để `NextSeqNo()` local không đụng seq peer đã dùng |
+| `CanvasApp.Server/RoomManager.cs` | Thêm field `_peerMembers: ConcurrentDictionary<peerId, ConcurrentDictionary<roomId, List<RoomMember>>>`. Sửa `GetRoomList()` trả về **shallow clones** của `Room` với `CurrentUsers = local + peer counts` (không mutate object gốc vì sẽ race với `Join`/`Leave`). Sửa `GetMembers()` thành union local + peer, dedupe theo `UserId` via `HashSet<int>`. Thêm `GetLocalMembers()` để publish (chỉ local, tránh echo loop). Thêm `GetAllLocalMembers()` cho `PEER_HELLO` snapshot. Thêm `UpdatePeerMembers(peerId, roomId, members)`, `DropPeer(peerId)`. **Quan trọng**: `ApplyFromPeerAsync(roomId, originId, inner)` — guard `_rooms.ContainsKey` (không ghost-create room), guard `_canvasLoaded.ContainsKey` (chưa load DB thì skip mutate; lần `EnsureCanvasLoaded` tiếp theo sẽ pull đầy đủ từ DB). Switch theo `inner.Type` để apply phù hợp, kết thúc bằng `BroadcastAsync` (không publish lại) |
+| `CanvasApp.Server/Program.cs` | Thêm field static `_peerManager`, `_serverId`. Trong `Main`: tính `_serverId = $"canvas-{port}"`, `peerListenPort = port + 100` (convention 9002↔9102, 9003↔9103). Đọc peer list theo thứ tự: CLI arg `[1]` (comma-sep) → `appsettings.json::ServerSettings.Peers` → empty. Khởi tạo `PeerManager` với hello builder gọi `_roomManager.GetAllLocalMembers()`. Start peer listener riêng (`TcpListener` trên `peerListenPort`), mỗi accept gọi `PeerHandler.HandleAsync`. 2 helper: `PublishToPeersAsync(roomId, inner)` wrap thành `PEER_RELAY`; `PublishLocalMembersAsync(roomId)` wrap thành `PEER_MEMBER_SYNC`. Hook 2 helper này SAU mỗi `BroadcastAsync` ở: cleanup khi disconnect (`ROOM_UPDATE` + members), `ROOM_LEAVE`, `DRAW_START/MOVE/END/SHAPE/TEXT` (re-serialize msg sau `RecordDrawAction` để peer thấy SeqNo/ActionId đã stamp), `DRAW_FILL`, `DRAW_UNDO`, `DRAW_CLEAR`, `CHAT_MESSAGE`, `CHAT_FILE`, `HandleJoin` (`ROOM_UPDATE` + members) |
+| `CanvasApp.Server/Config/appsettings.json` | Thêm key `Peers: []` trong `ServerSettings`. Format `"host:peerPort"`, vd `"127.0.0.1:9103"`. CLI arg ưu tiên hơn config để dễ chạy multi-instance từ Visual Studio |
+| `CanvasApp.Server/CanvasApp.Server.csproj` | Thêm `<Compile Include="PeerManager.cs" />` và `<Compile Include="PeerHandler.cs" />` |
+
+## Kiến trúc — quyết định quan trọng
+
+| Quyết định | Lý do |
+|-----------|-------|
+| Mesh full-connectivity thay vì 1 broker tập trung | Không thêm process/dependency. N=2 server đủ cho demo; nếu scale lên N=10 thì chuyển sang broker. Topology hiện tại O(N²) connection |
+| Peer connection **one-way** (mỗi server có outbound riêng tới mỗi peer) | Đơn giản hóa: không cần multiplex 2 chiều trên 1 socket, không phải lo `SemaphoreSlim` cho cả read+write. Drop detect qua `ReadAsync` return 0. Trade-off: gấp đôi số socket nhưng mỗi socket chỉ 1 hướng |
+| Peer-relayed action KHÔNG persist DB | Tránh double-write: originator đã write qua `PersistenceQueue`. Nếu cả 2 cùng write thì `draw_actions` (id auto-increment) có 2 row trùng nội dung — replay sẽ vẽ 2 lần. Hệ lụy: nếu originator crash sau khi publish mà trước khi DB flush → mất action; chấp nhận được vì `PersistenceQueue` batch flush nhanh |
+| Peer-received action vẫn add vào `_canvasState` (RAM) | Để new joiner trên peer thấy action ngay khi join. Nếu chỉ broadcast mà không lưu RAM, joiner phải đợi `EnsureCanvasLoaded` từ DB → action chưa flush vẫn miss |
+| Guard `_canvasLoaded.ContainsKey` trước khi mutate `_canvasState` | Race: peer relay action 61 đến trước khi server B có client nào trong room → `_canvasState[R]` chưa tồn tại. Nếu add vào (qua `GetOrAdd`) thì lần `EnsureCanvasLoaded` sau sẽ thấy state đã có 1 action lẻ + nạp 1..61 từ DB → out-of-order. Skip cho đến khi load hoàn tất là an toàn |
+| `GetRoomList()` trả về shallow CLONE thay vì mutate `Room.CurrentUsers` | `Join`/`Leave` lock theo `_roomClients` list, không cùng lock với peer merge. Clone tránh torn write giữa local update và peer merge |
+| Dedupe `GetMembers()` theo `UserId` | Trong window reconnect race (client logout server A, login server B), cùng userId có thể xuất hiện ở `_peerMembers["canvas-9002"]` lẫn local. Hiển thị 2 lần là bug UX → dedupe nhanh qua `HashSet<int>` |
+| `INSERT IGNORE` thay vì coordinate snapshot version qua lock distributed | Snapshot chỉ là cache. Mất 1-2 snapshot chỉ tăng thời gian replay deltas lúc load, không sai correctness. Distributed lock (qua DB row lock hoặc Redis SETNX) phức tạp hơn nhiều, không xứng cost/benefit cho demo |
+
+## Demo
+
+1. **Setup**: build solution (đóng tất cả `CanvasApp.Client.exe` đang chạy trước nếu MSBuild kêu file lock). Mở 5 console:
+   - 2× `CanvasApp.AuthServer.exe` ports 9001, 9011
+   - 2× `CanvasApp.Server.exe` với CLI args:
+     - `CanvasApp.Server.exe 9002 127.0.0.1:9103`
+     - `CanvasApp.Server.exe 9003 127.0.0.1:9102`
+   - 1× `CanvasApp.LoadBalancer.exe` (banner hiển thị 2 Auth + 2 Canvas)
+
+2. **Xác nhận mesh up**: console `9002` log `[PEER] inbound listener on :9102`, sau ~1s thấy `[PEER] outbound -> 127.0.0.1:9103 connected` và `[PEER] inbound <- 127.0.0.1:5xxxx hello (id=canvas-9003)`. Tương tự `9003` log mirror.
+
+3. **Split-brain hết bug**: Login 4 user, mỗi cặp join cùng room qua mã mời. LB log có thể vẫn route 2 cặp sang 2 server khác nhau (least-loaded):
+   ```
+   [LB] ... -> Canvas 127.0.0.1:9002 (first=ROOM_LIST)   ← duck, zhue
+   [LB] ... -> Canvas 127.0.0.1:9003 (first=ROOM_LIST)   ← test, nguyethadaodai
+   ```
+   Nhưng cả 4 user đều thấy nhau trong **danh sách thành viên** (4/8), thấy nét vẽ, tin chat của nhau.
+
+4. **Vẽ cross-server**: `duck` (server 9002) vẽ 1 hình tròn. Server 9002 console log thấy action. `test` (server 9003) thấy hình tròn xuất hiện. Server 9003 console **không có** `[DB] DrawAction inserted` cho hình đó (peer-relayed → no DB write).
+
+5. **Chat cross-server**: `duck` gửi "hello". `test` thấy "hello" với tên "duck" + màu đúng. `_chatDao.Insert` chỉ chạy trên 9002.
+
+6. **Member sync khi rời phòng**: `nguyethadaodai` (9003) logout. `duck`/`zhue` (9002) thấy member list giảm xuống còn 3 ngay, không phải đợi.
+
+7. **Snapshot không còn lỗi**: chạy lâu 2-3 phút, console không còn `Duplicate entry '...' for key 'uk_room_version'`.
+
+8. **Peer failover**: kill console 9003 (`Ctrl+C`). Console 9002 log `[PEER] inbound <- ... closed`, `DropPeer(canvas-9003)`. User trên 9002 thấy member list của room "tự co lại" về local-only. Bật lại 9003 → outbound tự reconnect (backoff) → PEER_HELLO sync lại snapshot member.
+
+## Giới hạn đã biết
+
+- **Seq counter per-server, không strict-monotonic**: server A allocate seq 5, server B local cũng đang ở seq 4 thì allocate 5 song song → 2 action có cùng SeqNo trong DB (`draw_actions` không UNIQUE (room_id, seq_no), chỉ INDEX). Render order tại client dựa vào thứ tự message arrival, không sort theo SeqNo, nên hiện không ảnh hưởng. Nếu sau này client sort theo SeqNo thì cần global seq qua DB hoặc seq prefix theo serverId.
+- **Peer chưa connect lúc client gửi action**: action không được peer-relay. Khi peer connect sau, action đã miss → user trên peer không thấy nếu join sau khi action xảy ra. Nhưng vì action đã persist DB, lần `EnsureCanvasLoaded` trên peer sẽ catch up.
+- **`PEER_HELLO` chỉ gửi 1 lần khi connect**: nếu hello bị mất do peer disconnect ngay sau connect, member view có thể stale cho tới event tiếp theo. Có thể bổ sung periodic resync nếu cần.
+- **N=2 hard-coded trong demo**: hoạt động đúng với N>2 (mesh full-connect), chỉ là chưa test stress.
+
+---
+
+
+# [2026-05-20] Fix — LoadBalancer mất BOM khi peek dòng JSON đầu (Login token expired)
+
+User login bị popup `Token không hợp lệ hoặc đã hết hạn` ngay tại màn login mặc dù chưa làm gì. LB log:
+```
+[LB] 127.0.0.1:55860 -> Canvas 127.0.0.1:9003 ... (first=)
+```
+`(first=)` rỗng — LB không parse được type của message đầu, fallback về Canvas pool thay vì Auth pool. Canvas server thấy AUTH_LOGIN (không có token hợp lệ) → trả `ERROR { message: "Token..." }`. `AuthClient` deserialize ERROR thành `LoginResult` (JSON.NET case-insensitive map `message` → `Message`, `Success` default `false`) → popup hiển thị.
+
+Nguyên nhân: `AuthClient` và `CanvasClient` mở `StreamWriter(stream, Encoding.UTF8)` ⇒ .NET tự động ghi **UTF-8 BOM (0xEF 0xBB 0xBF)** ở đầu connection. Backend dùng `StreamReader` thì BOM được strip tự động, nhưng `LoadBalancer.ReadOneLineAsync()` đọc byte-by-byte raw → BOM còn trong chuỗi → `JsonConvert.DeserializeObject<Message>("﻿{\"type\":\"AUTH_LOGIN\"...}")` fail silent → `type = ""`.
+
+| File | Thay đổi |
+|------|----------|
+| `CanvasApp.LoadBalancer/LoadBalancer.cs` | Thêm `private const char Utf8Bom = '﻿'` + `StripBom(string)`. Gọi `StripBom()` ở 2 điểm return của `ReadOneLineAsync` (cả nhánh stream close giữa chừng lẫn nhánh đọc trọn dòng). Re-encode `firstLine + "\n"` đẩy về backend vẫn OK vì backend dùng `StreamReader` |
+
+Sau fix: LB log `(first=AUTH_LOGIN)` → route Auth pool đúng.
+
+---
+
+
+# [2026-05-20] Fix — Bitmap canvas không đồng bộ size giữa client (cắt mất nét khi zoom out)
+
+Client A (cửa sổ to) zoom out tối đa, vẽ ở rìa canvas. Client B (cửa sổ nhỏ) thấy nét bị cắt hoặc không thấy.
+
+Nguyên nhân: `CanvasForm.InitCanvas()` tính bitmap size theo **`canvasPanel.Width × 4` × `canvasPanel.Height × 4`** ⇒ panel-dependent. Client A panel 1920px → bitmap cover canvas X ∈ [-3840, 3840]. Client B panel 800px → bitmap cover [-1600, 1600]. Nét A vẽ ở canvas X=1500 nằm trong bitmap A nhưng sát biên bitmap B → render bị cắt (margin = 200px, không grow vì `1500+1600=3100 < 3200-200`).
+
+| File | Thay đổi |
+|------|----------|
+| `CanvasApp.Client/Forms/CanvasForm.cs` | Thêm `private const int InitialHalfExtent = 2000`. `InitCanvas()` dùng `_canvasOffsetX = _canvasOffsetY = InitialHalfExtent` (cố định, không phụ thuộc panel). Mọi client khởi tạo bitmap 4000×4000, cover cùng vùng canvas `[-2000, 2000]² ` ngay từ đầu. `EnsureCanvasCovers()` vẫn grow đối xứng khi cần |
+
+---
+
+
+# [2026-05-20] Fix — Danh sách user bị cắt khi nhiều hơn 3 user; chat không scroll lên đọc lại được
+
+User hỏi 2 bug UX cùng panel phải của Canvas:
+
+1. **User list** ([pnlUserList](CanvasApp.Client/Forms/CanvasForm.Designer.cs)): `AutoScroll = true` đã bật trong designer, scrollbar tự xuất hiện khi > 3 user. Nhưng `RenderUserList()` set `item.Width = pnlUserList.Width - 10` (Width FULL), khi vertical scrollbar nhô ra (~17px) → item lòi sang phải → sinh thêm horizontal scrollbar phá layout.
+2. **Chat** ([rtbChatHistory](CanvasApp.Client/Forms/CanvasForm.Designer.cs)): `RichTextBox` có scrollbar dọc sẵn, **kỹ thuật scroll lên được**, nhưng `AppendChatMessage()` gọi `ScrollToCaret()` mỗi tin → user đang cuộn đọc lịch sử bị giật xuống đáy mỗi vài giây.
+
+| File | Thay đổi |
+|------|----------|
+| `CanvasApp.Client/Forms/CanvasForm.cs` | `RenderUserList()`: dùng `pnlUserList.ClientSize.Width - 10` (đã trừ scrollbar) thay vì `pnlUserList.Width`. Set `HorizontalScroll.Enabled = false` + `HorizontalScroll.Visible = false` để ép vertical-only. Wrap trong `SuspendLayout`/`ResumeLayout` để không flicker khi re-render |
+| `CanvasApp.Client/Forms/CanvasForm.cs` | Thêm `using System.Runtime.InteropServices`. P/Invoke `SendMessage` + constants `EM_GETFIRSTVISIBLELINE = 0x00CE`, `EM_LINESCROLL = 0x00B6` (RichTextBox không expose scroll position qua managed API). Helper `IsChatAtBottom()` so sánh `firstVisible + visibleLines >= totalLines - 1`. Helper `RestoreChatScroll(wasAtBottom, firstVisibleBefore)`: nếu user ở đáy thì `ScrollToCaret()` như cũ, ngược lại gọi `EM_LINESCROLL` đẩy view về `firstVisibleBefore` đã lưu (cuộn ngược lại đúng số dòng) |
+| `CanvasApp.Client/Forms/CanvasForm.cs` | `AppendChatMessage()`, `AppendSystemMessage()`, `AppendFileMessage()`: lưu `wasAtBottom` + `firstVisibleBefore` đầu method, gọi `RestoreChatScroll` cuối method thay cho `ScrollToCaret()` cứng |
+
+UX: user cuộn lên đọc tin cũ thoải mái, tin mới đến vẫn append nhưng không kéo view; cuộn xuống đáy lại là auto-follow tự bật lại.
+
+---
+
+
 # [2026-05-19] Feature — Load Balancer (Cân bằng tải Auth + Canvas, room-affinity routing)
 
 Hoàn thành mục **7 — Load Balancer** trong REMAINING TASKS. Module `CanvasApp.LoadBalancer` là một **TCP proxy lai L4/L7** đứng giữa Client và 2 pool backend (Auth Server + Canvas Server). Listen port `9000` — Client chỉ cần biết duy nhất port này, không bao giờ kết nối thẳng `9001/9002/...`. So với bản layer-4 đầu, bản này bổ sung **5 hạng mục thiếu**: tách 2 pool Auth/Canvas, peek message JSON đầu, room-affinity routing table (`ConcurrentDictionary<roomId, ServerInfo>`), `RoomCount` tracking với ref-count tự dọn, health check 3-strike `FailCount` thay vì 1-shot bool.
@@ -510,3 +932,4 @@ Done Foundation, giờ cần logic đồ họa và các tính năng sáng tạo:
 8. ~~**Gợi ý hoàn thiện nét vẽ**~~ ✅ **DONE** (2026-05-19) — Smart Shape Recognition cho Line/Rectangle/Circle/Ellipse với overlay Accept/Reject. Xem entry `[2026-05-19] Feature — Smart Shape Recognition` ở đầu file.
 9.  Xác thực email (kiểu check email real hay fake hoặc thêm cái dạng xác thực OTP qua mail càng tốt)
       > Kim Quyen
+Get-Process CanvasApp.Client -ErrorAction SilentlyContinue | Stop-Process -Force

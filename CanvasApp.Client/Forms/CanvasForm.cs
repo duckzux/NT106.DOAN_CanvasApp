@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Web;
 using System.Web.Configuration;
 using System.Windows.Forms;
@@ -15,6 +16,9 @@ namespace CanvasApp.Client
     {
         // ── Drawing state ───────────────────────────────────────────────
         private Bitmap _bitmap;
+        // Chronological log of every committed action (local + remote). Source of truth for RedrawCanvas.
+        private readonly List<DrawAction> _history = new List<DrawAction>();
+        // Local user's undo/redo stacks — contain only actions THIS client created.
         private Stack<DrawAction> _undoStack = new Stack<DrawAction>();
         private Stack<DrawAction> _redoStack = new Stack<DrawAction>();
         private Graphics _graphics;
@@ -36,6 +40,10 @@ namespace CanvasApp.Client
 
         private Room _room;
         private string _roomPassword;
+        // RoomId for the upcoming ROOM_JOIN, set by PrepareForJoin BEFORE Show().
+        // Used so the form can send the join itself on Shown — that ensures CHAT_HISTORY
+        // and ROOM_JOIN_RESULT arrive while OnServerMessage is already subscribed.
+        private string _pendingRoomId;
         private string _template = "Blank";
         private List<RoomMember> _initialMembers; // members lúc join (truyền từ LobbyForm)
 
@@ -45,6 +53,10 @@ namespace CanvasApp.Client
         private Common.PointF _editCanvasPos;
         private System.Windows.Forms.Timer _cursorTimer;
         private bool _cursorVisible = true;
+        // Set when editing an existing text action (vs. placing new). On commit we tell
+        // peers to remove the original via DRAW_UNDO + ActionId. On cancel we restore it.
+        private string _editingActionId;
+        private DrawAction _editingOriginal;
 
         // Chat file storage: fileId → (FileName, Data)
         private readonly Dictionary<string, (string FileName, byte[] Data)> _chatFiles =
@@ -91,21 +103,27 @@ namespace CanvasApp.Client
             btnPen.Click += (s, e) => _currentTool = "pen";
             btnEraser.Click += (s, e) => _currentTool = "eraser";
             // Undo - Redo
-            btnUndo.Click += (s, e) =>
+            btnUndo.Click += async (s, e) =>
             {
-                if (_undoStack.Count > 0)
-                {
-                    _redoStack.Push(_undoStack.Pop());
-                    RedrawCanvas();
-                }
+                if (_undoStack.Count == 0) return;
+                var action = _undoStack.Pop();
+                _redoStack.Push(action);
+                if (!string.IsNullOrEmpty(action.ActionId))
+                    _history.RemoveAll(a => a.ActionId == action.ActionId);
+                RedrawCanvas();
+                await CanvasClient.Instance.SendAsync(new Common.Message(MessageType.DRAW_UNDO));
             };
-            btnRedo.Click += (s, e) =>
+            btnRedo.Click += async (s, e) =>
             {
-                if (_redoStack.Count > 0)
-                {
-                    _undoStack.Push(_redoStack.Pop());
-                    RedrawCanvas();
-                }
+                if (_redoStack.Count == 0) return;
+                var action = _redoStack.Pop();
+                // Generate a fresh ActionId — the previous one is gone from every peer's history.
+                action.ActionId = NewActionId();
+                _undoStack.Push(action);
+                _history.Add(action);
+                DrawActionLocal(action);
+                canvasPanel.Invalidate();
+                await CanvasClient.Instance.SendDrawAsync(MessageTypeFor(action), action);
             };
 
             // Import - Export Background
@@ -178,9 +196,23 @@ namespace CanvasApp.Client
             btnRectangle.Click += (s, e) => _currentTool = "rectangle";
             btnCircle.Click += (s, e) => _currentTool = "circle";
             btnLine.Click += (s, e) => _currentTool = "line";
-            btnArrow.Click += (s, e) => _currentTool = "arrow";
+            btnTriangle.Click += (s, e) => _currentTool = "triangle";
             btnText.Click += (s, e) => _currentTool = "text";
             chkFill.Click += (s, e) => _currentTool = "fill";
+
+            // Arrow tool — click opens a dropdown of arrow variants.
+            var arrowMenu = new ContextMenuStrip();
+            arrowMenu.Items.Add("Mũi tên đơn",        null, (s, e) => _currentTool = "arrow");
+            arrowMenu.Items.Add("Mũi tên hai đầu",    null, (s, e) => _currentTool = "arrow_double");
+            arrowMenu.Items.Add("Mũi tên đứt nét",    null, (s, e) => _currentTool = "arrow_dashed");
+            arrowMenu.Items.Add("Mũi tên đậm",        null, (s, e) => _currentTool = "arrow_thick");
+            btnArrow.Click += (s, e) =>
+            {
+                // Anchor menu to the right of the toolstrip button.
+                var btn = btnArrow;
+                var screenPt = toolStrip1.PointToScreen(new Point(btn.Bounds.Right, btn.Bounds.Top));
+                arrowMenu.Show(screenPt);
+            };
             
             btnClear.Click += async (s, e) =>
             {
@@ -245,11 +277,21 @@ namespace CanvasApp.Client
 
             CanvasClient.Instance.OnMessageReceived += OnServerMessage;
 
+            // Send ROOM_JOIN once the form is shown so the handle is live BEFORE the server
+            // starts streaming ROOM_JOIN_RESULT / CHAT_HISTORY / ROOM_UPDATE on this socket.
+            // Without this we'd race the subscription and lose CHAT_HISTORY.
+            this.Shown += async (s, e) =>
+            {
+                if (!string.IsNullOrEmpty(_pendingRoomId))
+                    await CanvasClient.Instance.JoinRoomAsync(_pendingRoomId, _roomPassword ?? "");
+            };
+
             // ── Smart shape recognition wiring ──────────────────────────
             _suggest.CommitShape += async (shape, color, thickness) =>
             {
                 var action = new DrawAction
                 {
+                    ActionId = NewActionId(),
                     Type = shape.ToDrawActionType(),
                     Color = ColorToHex(color),
                     Thickness = thickness,
@@ -260,6 +302,7 @@ namespace CanvasApp.Client
                     }
                 };
                 DrawActionLocal(action);
+                _history.Add(action);
                 _undoStack.Push(action);
                 _redoStack.Clear();
                 canvasPanel.Invalidate();
@@ -270,6 +313,7 @@ namespace CanvasApp.Client
             {
                 var action = new DrawAction
                 {
+                    ActionId = NewActionId(),
                     Type = "pen",
                     Color = ColorToHex(color),
                     Thickness = thickness,
@@ -277,6 +321,7 @@ namespace CanvasApp.Client
                 };
                 foreach (var p in pts) action.Points.Add(new Common.PointF(p.X, p.Y));
                 DrawActionLocal(action);
+                _history.Add(action);
                 _undoStack.Push(action);
                 _redoStack.Clear();
                 canvasPanel.Invalidate();
@@ -297,50 +342,76 @@ namespace CanvasApp.Client
             };
         }
 
-        public void SetRoom(JoinRoomResult joinRes, string password = "")
+        /// <summary>
+        /// Called BEFORE Show() to seed the password (needed for reconnect) and roomId. The
+        /// actual Room + snapshot + members arrive later via <see cref="ApplyJoinResult"/>
+        /// when the persistent connection's ROOM_JOIN_RESULT lands. We split it this way so
+        /// the LB-routed pre-join (ROOM_RESOLVE) doesn't have to ship snapshot data — the
+        /// LB pre-join no longer triggers a real Join on the server.
+        /// </summary>
+        public void PrepareForJoin(string roomId, string password)
+        {
+            _pendingRoomId = roomId;
+            _roomPassword = password;
+        }
+
+        /// <summary>
+        /// Apply the ROOM_JOIN_RESULT received over the persistent connection: render member
+        /// panel, replay snapshot + delta actions onto the canvas, show the welcome system
+        /// message. Safe to call any time after Show() (handle is required).
+        /// </summary>
+        private void ApplyJoinResult(JoinRoomResult joinRes)
         {
             _room = joinRes.Room;
-            _roomPassword = password;
             _template = joinRes.Room?.Template ?? "Blank";
             _initialMembers = joinRes.Members ?? new List<RoomMember>();
-            this.Load += (s, e) =>
-            {
-                lblRoomName.Text = $"Phòng vẽ: {joinRes.Room.Name}";
-                // Show the invite code so users can share it
-                var code = joinRes.Room.InviteCode ?? joinRes.Room.Id;
-                lblRoomCode.Text = $"Mã mời: {code}";
 
-                // Apply compressed snapshot baseline first (if available),
-                // then apply the delta actions on top.
-                if (!string.IsNullOrEmpty(joinRes.SnapshotData))
+            lblRoomName.Text = $"Phòng vẽ: {joinRes.Room.Name}";
+            var code = joinRes.Room.InviteCode ?? joinRes.Room.Id;
+            lblRoomCode.Text = $"Mã mời: {code}";
+
+            if (!string.IsNullOrEmpty(joinRes.SnapshotData))
+            {
+                try
                 {
-                    try
+                    var baseline = SnapshotHelper.Decompress(joinRes.SnapshotData);
+                    foreach (var action in baseline)
                     {
-                        var baseline = SnapshotHelper.Decompress(joinRes.SnapshotData);
-                        foreach (var action in baseline)
-                            DrawActionLocal(action);
-                    }
-                    catch (Exception ex)
-                    {
-                        AppendSystemMessage($"[Cảnh báo] Không thể tải snapshot: {ex.Message}");
+                        DrawActionLocal(action);
+                        if (string.IsNullOrEmpty(action.ActionId))
+                            action.ActionId = "srv-" + action.SeqNo;
+                        _history.Add(action);
                     }
                 }
+                catch (Exception ex)
+                {
+                    AppendSystemMessage($"[Cảnh báo] Không thể tải snapshot: {ex.Message}");
+                }
+            }
 
-                foreach (var action in joinRes.CanvasState)
-                    DrawActionLocal(action);
+            foreach (var action in joinRes.CanvasState)
+            {
+                DrawActionLocal(action);
+                if (string.IsNullOrEmpty(action.ActionId))
+                    action.ActionId = "srv-" + action.SeqNo;
+                _history.Add(action);
+            }
 
-                canvasPanel.Invalidate();
-                RenderUserList(_initialMembers);
-                AppendSystemMessage($"Bạn đã vào phòng '{joinRes.Room.Name}'.");
-            };
+            canvasPanel.Invalidate();
+            RenderUserList(_initialMembers);
+            AppendSystemMessage($"Bạn đã vào phòng '{joinRes.Room.Name}'.");
         }
 
         // ── Canvas init ─────────────────────────────────────────────────
+        // Fixed initial canvas-space so every client starts with the same shared region —
+        // panel-dependent sizing made bitmaps diverge between clients with different window sizes
+        // and lost edge strokes drawn while zoomed out. EnsureCanvasCovers still grows on demand.
+        private const int InitialHalfExtent = 2000;
+
         private void InitCanvas()
         {
-            // Bitmap gấp 4 lần panel để vẽ được ở vùng xung quanh khi thu nhỏ / kéo màn hình
-            _canvasOffsetX = Math.Max(canvasPanel.Width, 100) * 2;
-            _canvasOffsetY = Math.Max(canvasPanel.Height, 100) * 2;
+            _canvasOffsetX = InitialHalfExtent;
+            _canvasOffsetY = InitialHalfExtent;
             _bitmap = new Bitmap(_canvasOffsetX * 2, _canvasOffsetY * 2);
             _graphics = Graphics.FromImage(_bitmap);
             _graphics.Clear(Color.Transparent);
@@ -355,6 +426,7 @@ namespace CanvasApp.Client
             if (_graphics != null)
             {
                 _graphics.Clear(Color.Transparent);
+                _history.Clear();
                 _undoStack.Clear();
                 _redoStack.Clear();
                 canvasPanel.Invalidate();
@@ -438,13 +510,40 @@ namespace CanvasApp.Client
                     if (isFill) g.FillEllipse(brush, x, y, width, height);
                     else g.DrawEllipse(pen, x, y, width, height);
                 }
+                else if (baseType == "triangle")
+                {
+                    var top = new System.Drawing.PointF((p1.X + p2.X) / 2f, Math.Min(p1.Y, p2.Y));
+                    var bl  = new System.Drawing.PointF(Math.Min(p1.X, p2.X), Math.Max(p1.Y, p2.Y));
+                    var br  = new System.Drawing.PointF(Math.Max(p1.X, p2.X), Math.Max(p1.Y, p2.Y));
+                    var pts = new System.Drawing.PointF[] { top, bl, br };
+                    if (isFill) g.FillPolygon(brush, pts);
+                    else        g.DrawPolygon(pen, pts);
+                }
                 else if (baseType == "line")
                 {
                     g.DrawLine(pen, p1.X, p1.Y, p2.X, p2.Y);
                 }
-                else if (baseType == "arrow")
+                else if (baseType.StartsWith("arrow"))
                 {
-                    pen.CustomEndCap = new AdjustableArrowCap(5, 5); 
+                    // arrow / arrow_double / arrow_dashed / arrow_thick
+                    if (baseType == "arrow_double")
+                    {
+                        pen.CustomStartCap = new AdjustableArrowCap(5, 5);
+                        pen.CustomEndCap   = new AdjustableArrowCap(5, 5);
+                    }
+                    else if (baseType == "arrow_dashed")
+                    {
+                        pen.DashStyle    = DashStyle.Dash;
+                        pen.CustomEndCap = new AdjustableArrowCap(5, 5);
+                    }
+                    else if (baseType == "arrow_thick")
+                    {
+                        pen.CustomEndCap = new AdjustableArrowCap(8, 8, true);
+                    }
+                    else
+                    {
+                        pen.CustomEndCap = new AdjustableArrowCap(5, 5);
+                    }
                     g.DrawLine(pen, p1.X, p1.Y, p2.X, p2.Y);
                 }
             }
@@ -596,9 +695,35 @@ namespace CanvasApp.Client
 
             if (_currentTool == "text")
             {
+                var clickPt = ScreenToCanvas(e.X, e.Y);
+                var existing = HitTestText(clickPt);
+                if (existing != null)
+                {
+                    // Begin editing an existing text. Pull it out of local state so the
+                    // bitmap redraws without it; we put it back on cancel or replace on commit.
+                    _editingActionId = existing.ActionId;
+                    _editingOriginal = existing;
+                    _editText        = existing.Type.Substring(5);
+                    _editCanvasPos   = existing.Points[0];
+                    _currentColor    = HexToColor(existing.Color);
+                    _thickness       = Math.Max(1, existing.Thickness);
+                    _textEditActive  = true;
+                    _cursorVisible   = true;
+
+                    _history.RemoveAll(a => a.ActionId == existing.ActionId);
+                    var keep = _undoStack.Where(a => a.ActionId != existing.ActionId).ToArray();
+                    // Stack ctor reverses iteration order; pass in original push order to preserve top.
+                    _undoStack = new Stack<DrawAction>(keep.Reverse());
+                    _redoStack.Clear();
+                    RedrawCanvas();
+                    return;
+                }
+
+                _editingActionId = null;
+                _editingOriginal = null;
                 _textEditActive = true;
                 _editText = "";
-                _editCanvasPos = ScreenToCanvas(e.X, e.Y);
+                _editCanvasPos = clickPt;
                 _cursorVisible = true;
                 canvasPanel.Invalidate();
                 return;
@@ -614,10 +739,14 @@ namespace CanvasApp.Client
                 canvasPanel.Invalidate();
                 var fillAction = new DrawAction
                 {
+                    ActionId = NewActionId(),
                     Type = "fill",
                     Color = ColorToHex(_currentColor),
                     Points = new List<Common.PointF> { pt }
                 };
+                _history.Add(fillAction);
+                _undoStack.Push(fillAction);
+                _redoStack.Clear();
                 await CanvasClient.Instance.SendDrawAsync(MessageType.DRAW_FILL, fillAction);
                 return;
             }
@@ -646,6 +775,7 @@ namespace CanvasApp.Client
 
             _currentStroke = new DrawAction
             {
+                ActionId = NewActionId(),
                 Type = toolType,
                 Color = ColorToHex(_currentTool == "eraser" ? Color.White : _currentColor),
                 Thickness = currentThickness,
@@ -739,6 +869,7 @@ namespace CanvasApp.Client
                 if (stroke.Points.Count >= 2)
                 {
                     DrawActionLocal(stroke);
+                    _history.Add(stroke);
                     _undoStack.Push(stroke);
                     _redoStack.Clear();
                     canvasPanel.Invalidate();
@@ -749,6 +880,7 @@ namespace CanvasApp.Client
             {
                 if (stroke.Points.Count > 0)
                 {
+                    _history.Add(stroke);
                     _undoStack.Push(stroke);
                     _redoStack.Clear();
                 }
@@ -782,7 +914,7 @@ namespace CanvasApp.Client
         private void DrawActionLocal(DrawAction action)
         {
             if (action == null || action.Points == null || _graphics == null) return;
-            if (action.Type.Contains("rectangle") || action.Type.Contains("circle") || action.Type.Contains("line") || action.Type.Contains("arrow"))
+            if (action.Type.Contains("rectangle") || action.Type.Contains("circle") || action.Type.Contains("line") || action.Type.Contains("arrow") || action.Type.Contains("triangle"))
             {
                 if (action.Points.Count < 2) return;
                 EnsureCanvasCovers(action.Points[0].X, action.Points[0].Y);
@@ -945,13 +1077,43 @@ namespace CanvasApp.Client
                 switch (msg.Type)
                 {
                     case MessageType.DRAW_MOVE:
-                    case MessageType.DRAW_END:
-                    case MessageType.DRAW_SHAPE:
-                    case MessageType.DRAW_FILL:
+                    {
+                        // Preview segment — paint it but don't persist to _history (DRAW_END will deliver the full stroke).
                         var action = msg.GetData<DrawAction>();
                         DrawActionLocal(action);
                         canvasPanel.Invalidate();
                         break;
+                    }
+
+                    case MessageType.DRAW_END:
+                    case MessageType.DRAW_SHAPE:
+                    case MessageType.DRAW_FILL:
+                    {
+                        var action = msg.GetData<DrawAction>();
+                        if (action == null) break;
+                        DrawActionLocal(action);
+                        if (string.IsNullOrEmpty(action.ActionId))
+                            action.ActionId = "srv-" + action.SeqNo; // legacy/server-assigned fallback
+                        _history.Add(action);
+                        // A remote action invalidates my pending redo branch (Figma semantics).
+                        _redoStack.Clear();
+                        canvasPanel.Invalidate();
+                        break;
+                    }
+
+                    case MessageType.DRAW_UNDO:
+                    {
+                        var notif = msg.GetData<UndoNotification>();
+                        if (notif == null || string.IsNullOrEmpty(notif.ActionId)) break;
+                        var removed = _history.RemoveAll(a => a.ActionId == notif.ActionId);
+                        if (removed > 0)
+                        {
+                            // A peer undid one of their actions — my own redo branch is no longer valid.
+                            _redoStack.Clear();
+                            RedrawCanvas();
+                        }
+                        break;
+                    }
 
                     case MessageType.DRAW_CLEAR:
                         ClearCanvas();
@@ -979,6 +1141,20 @@ namespace CanvasApp.Client
                         }
                         break;
 
+                    case MessageType.ROOM_JOIN_RESULT:
+                    {
+                        var joinRes = msg.GetData<JoinRoomResult>();
+                        if (joinRes == null || !joinRes.Success)
+                        {
+                            MessageBox.Show(joinRes?.Message ?? "Không vào được phòng",
+                                "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            this.Close();
+                            break;
+                        }
+                        ApplyJoinResult(joinRes);
+                        break;
+                    }
+
                     case MessageType.ROOM_UPDATE:
                         // ── Strongly-typed parse ────────────────────────
                         var update = msg.GetData<RoomMembersUpdate>();
@@ -1000,19 +1176,29 @@ namespace CanvasApp.Client
         // ── Render user list vào pnlUserList ────────────────────────────
         private void RenderUserList(List<RoomMember> members)
         {
+            pnlUserList.SuspendLayout();
             pnlUserList.Controls.Clear();
-            if (members == null) return;
+            // AutoScroll on the panel handles >3 members; suppress the horizontal bar so the vertical
+            // scrollbar appearing (which shrinks ClientSize) doesn't trigger a horizontal one in turn.
+            pnlUserList.HorizontalScroll.Enabled = false;
+            pnlUserList.HorizontalScroll.Visible = false;
+            pnlUserList.AutoScroll = true;
 
-            int yPos = 5;
-            foreach (var m in members)
+            if (members != null)
             {
-                var item = new UserListItem();
-                item.Width = pnlUserList.Width - 10;   // set width TRƯỚC SetData để badge align đúng
-                item.SetData(m.Username ?? "Unknown", m.Role ?? "Member", m.AvatarColor ?? "#7856CF");
-                item.Location = new Point(5, yPos);
-                pnlUserList.Controls.Add(item);
-                yPos += item.Height + 5;
+                int yPos = 5;
+                // ClientSize accounts for the vertical scrollbar so items don't overflow horizontally.
+                int itemWidth = pnlUserList.ClientSize.Width - 10;
+                foreach (var m in members)
+                {
+                    var item = new UserListItem { Width = itemWidth };
+                    item.SetData(m.Username ?? "Unknown", m.Role ?? "Member", m.AvatarColor ?? "#7856CF");
+                    item.Location = new Point(5, yPos);
+                    pnlUserList.Controls.Add(item);
+                    yPos += item.Height + 5;
+                }
             }
+            pnlUserList.ResumeLayout();
         }
 
         // ── Chat ────────────────────────────────────────────────────────
@@ -1044,6 +1230,24 @@ namespace CanvasApp.Client
             }
         }
 
+        // Win32 scroll messages — RichTextBox exposes no managed API to read/restore the scroll
+        // position, so we use SendMessage to keep the reader anchored when new messages arrive.
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int wMsg, IntPtr wParam, IntPtr lParam);
+        private const int EM_GETFIRSTVISIBLELINE = 0x00CE;
+        private const int EM_LINESCROLL = 0x00B6;
+
+        private bool IsChatAtBottom()
+        {
+            if (rtbChatHistory.TextLength == 0) return true;
+            int firstVisible = (int)SendMessage(rtbChatHistory.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
+            int lineHeight = Math.Max(1, rtbChatHistory.Font.Height);
+            int visibleLines = Math.Max(1, rtbChatHistory.ClientSize.Height / lineHeight);
+            int totalLines = rtbChatHistory.GetLineFromCharIndex(rtbChatHistory.TextLength) + 1;
+            // Treat anything within one visible line of the bottom as "at bottom".
+            return firstVisible + visibleLines >= totalLines - 1;
+        }
+
         private void AppendChatMessage(string user, string text)
         {
             if (this.InvokeRequired)
@@ -1051,6 +1255,9 @@ namespace CanvasApp.Client
                 this.Invoke(new Action(() => AppendChatMessage(user, text)));
                 return;
             }
+
+            bool wasAtBottom = IsChatAtBottom();
+            int firstVisibleBefore = (int)SendMessage(rtbChatHistory.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
 
             bool isMe = user == Session.CurrentUser?.Username;
             rtbChatHistory.SelectionStart = rtbChatHistory.TextLength;
@@ -1061,7 +1268,24 @@ namespace CanvasApp.Client
             rtbChatHistory.SelectionFont = new Font(rtbChatHistory.Font, FontStyle.Regular);
             rtbChatHistory.SelectionColor = rtbChatHistory.ForeColor;
             rtbChatHistory.AppendText($"{text}\r\n");
-            rtbChatHistory.ScrollToCaret();
+            RestoreChatScroll(wasAtBottom, firstVisibleBefore);
+        }
+
+        private void RestoreChatScroll(bool wasAtBottom, int firstVisibleBefore)
+        {
+            if (wasAtBottom)
+            {
+                rtbChatHistory.ScrollToCaret();
+            }
+            else
+            {
+                // The user was reading earlier history — selection updates above auto-scrolled to the
+                // bottom; scroll back so their reading position is preserved.
+                int firstVisibleNow = (int)SendMessage(rtbChatHistory.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
+                int delta = firstVisibleBefore - firstVisibleNow;
+                if (delta != 0)
+                    SendMessage(rtbChatHistory.Handle, EM_LINESCROLL, IntPtr.Zero, (IntPtr)delta);
+            }
         }
 
         private void AppendSystemMessage(string message)
@@ -1072,6 +1296,9 @@ namespace CanvasApp.Client
                 return;
             }
 
+            bool wasAtBottom = IsChatAtBottom();
+            int firstVisibleBefore = (int)SendMessage(rtbChatHistory.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
+
             rtbChatHistory.SelectionStart = rtbChatHistory.TextLength;
             rtbChatHistory.SelectionLength = 0;
             rtbChatHistory.SelectionColor = Color.DimGray;
@@ -1079,7 +1306,7 @@ namespace CanvasApp.Client
             rtbChatHistory.AppendText($"[Hệ thống] {message}\r\n");
             rtbChatHistory.SelectionColor = rtbChatHistory.ForeColor;
             rtbChatHistory.SelectionFont = rtbChatHistory.Font;
-            rtbChatHistory.ScrollToCaret();
+            RestoreChatScroll(wasAtBottom, firstVisibleBefore);
         }
 
         private void AppendFileMessage(string user, string fileName, long sizeBytes, string fileId)
@@ -1089,6 +1316,10 @@ namespace CanvasApp.Client
                 this.Invoke(new Action(() => AppendFileMessage(user, fileName, sizeBytes, fileId)));
                 return;
             }
+
+            bool wasAtBottom = IsChatAtBottom();
+            int firstVisibleBefore = (int)SendMessage(rtbChatHistory.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
+
             bool isMe = user == Session.CurrentUser?.Username;
             rtbChatHistory.SelectionStart = rtbChatHistory.TextLength;
             rtbChatHistory.SelectionLength = 0;
@@ -1101,7 +1332,7 @@ namespace CanvasApp.Client
             rtbChatHistory.AppendText($"    https://canvas-file/{fileId}\r\n");
             rtbChatHistory.SelectionFont = rtbChatHistory.Font;
             rtbChatHistory.SelectionColor = rtbChatHistory.ForeColor;
-            rtbChatHistory.ScrollToCaret();
+            RestoreChatScroll(wasAtBottom, firstVisibleBefore);
         }
 
         private static string FormatFileSize(long bytes)
@@ -1153,11 +1384,25 @@ namespace CanvasApp.Client
         private void RedrawCanvas()
         {
             _graphics.Clear(Color.Transparent); // Đổi thành Transparent để không đè lên Background Image
-            foreach (var action in _undoStack.Reverse())
-            {
+            foreach (var action in _history)
                 DrawActionLocal(action);
-            }
             canvasPanel.Invalidate();
+        }
+
+        private static string NewActionId() => Guid.NewGuid().ToString("N");
+
+        // Maps a DrawAction.Type back to the network message type used to broadcast it.
+        // Used when redoing a local action — we re-send it as if the user just drew it again.
+        private static string MessageTypeFor(DrawAction action)
+        {
+            if (action == null || string.IsNullOrEmpty(action.Type)) return MessageType.DRAW_END;
+            if (action.Type == "fill") return MessageType.DRAW_FILL;
+            if (action.Type.StartsWith("text:")) return MessageType.DRAW_SHAPE;
+            if (action.Type.Contains("rectangle") || action.Type.Contains("circle")
+                || action.Type.Contains("line") || action.Type.Contains("arrow")
+                || action.Type.Contains("triangle"))
+                return MessageType.DRAW_SHAPE;
+            return MessageType.DRAW_END; // pen, eraser
         }
 
         private void CanvasForm_KeyDown(object sender, KeyEventArgs e)
@@ -1233,18 +1478,32 @@ namespace CanvasApp.Client
         {
             _textEditActive = false;
             string text = _editText.Trim();
+            string oldId = _editingActionId;
+            _editingActionId = null;
+            _editingOriginal = null;
             _editText = "";
             canvasPanel.Invalidate();
+
+            // If we were editing existing text, tell server + peers to drop the original.
+            if (!string.IsNullOrEmpty(oldId))
+            {
+                await CanvasClient.Instance.SendAsync(new Common.Message(
+                    MessageType.DRAW_UNDO,
+                    new UndoNotification { ActionId = oldId }));
+            }
+
             if (string.IsNullOrEmpty(text)) return;
 
             var textAction = new DrawAction
             {
+                ActionId = NewActionId(),
                 Type = "text:" + text,
                 Color = ColorToHex(_currentColor),
                 Thickness = Math.Max(8, _thickness),
                 Points = new List<Common.PointF> { _editCanvasPos }
             };
             DrawActionLocal(textAction);
+            _history.Add(textAction);
             _undoStack.Push(textAction);
             _redoStack.Clear();
             canvasPanel.Invalidate();
@@ -1254,14 +1513,47 @@ namespace CanvasApp.Client
         private void CancelTextEdit()
         {
             _textEditActive = false;
+            // Editing existing text — restore the original locally; peers were never told it was removed.
+            if (_editingOriginal != null)
+            {
+                _history.Add(_editingOriginal);
+                _undoStack.Push(_editingOriginal);
+                RedrawCanvas();
+            }
+            _editingActionId = null;
+            _editingOriginal = null;
             _editText = "";
             canvasPanel.Invalidate();
+        }
+
+        // Hit-tests text actions in _history (top-down). Returns the topmost text whose
+        // measured rect contains the canvas point, or null.
+        private DrawAction HitTestText(Common.PointF canvasPt)
+        {
+            if (_graphics == null) return null;
+            for (int i = _history.Count - 1; i >= 0; i--)
+            {
+                var a = _history[i];
+                if (a?.Type == null || !a.Type.StartsWith("text:")) continue;
+                if (a.Points == null || a.Points.Count == 0) continue;
+                string content = a.Type.Substring(5);
+                if (string.IsNullOrEmpty(content)) continue;
+                using (var font = new Font("Arial", Math.Max(1f, a.Thickness), FontStyle.Regular, GraphicsUnit.Point))
+                {
+                    SizeF sz = _graphics.MeasureString(content, font);
+                    var rect = new RectangleF(a.Points[0].X, a.Points[0].Y, sz.Width, sz.Height);
+                    if (rect.Contains(canvasPt.X, canvasPt.Y)) return a;
+                }
+            }
+            return null;
         }
 
         // ── Shape & Brush Utilities ─────────────────────────────────────
         private bool IsShapeTool(string tool)
         {
-            return tool == "rectangle" || tool == "circle" || tool == "line" || tool == "arrow";
+            if (string.IsNullOrEmpty(tool)) return false;
+            return tool == "rectangle" || tool == "circle" || tool == "line"
+                || tool == "triangle" || tool.StartsWith("arrow");
         }
         //brush-size
         private void tscbSize_TextChanged(object sender, EventArgs e)
@@ -1283,6 +1575,11 @@ namespace CanvasApp.Client
         }
 
         private void btnAttachFile_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void btnTriangle_Click(object sender, EventArgs e)
         {
 
         }

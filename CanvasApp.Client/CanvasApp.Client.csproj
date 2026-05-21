@@ -124,6 +124,7 @@
     </Compile>
     <Compile Include="Network\AuthClient.cs" />
     <Compile Include="Network\CanvasClient.cs" />
+    <Compile Include="Network\LobbyClient.cs" />
     <Compile Include="Network\Session.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />

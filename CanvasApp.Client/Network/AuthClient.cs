@@ -8,7 +8,8 @@ using CanvasApp.Common;
 namespace CanvasApp.Client
 {
     /// <summary>
-    /// Client kết nối ngắn hạn đến AuthServer: gửi login/register, đóng kết nối.
+    /// Client kết nối ngắn hạn đến LoadBalancer: gửi login/register, đóng kết nối.
+    /// LB peek message đầu tiên (AUTH_LOGIN/AUTH_REGISTER) và round-robin sang Auth pool.
     /// </summary>
     public static class AuthClient
     {
@@ -18,9 +19,9 @@ namespace CanvasApp.Client
             {
                 using (var tcp = new TcpClient())
                 {
-                    var task = tcp.ConnectAsync(Session.AUTH_HOST, Session.AUTH_PORT);
+                    var task = tcp.ConnectAsync(Session.LB_HOST, Session.LB_PORT);
                     if (await Task.WhenAny(task, Task.Delay(3000)) != task)
-                        return new LoginResult { Success = false, Message = "Không kết nối được AuthServer (timeout)" };
+                        return new LoginResult { Success = false, Message = "Không kết nối được Load Balancer (timeout)" };
 
                     using (var stream = tcp.GetStream())
                     using (var reader = new StreamReader(stream, Encoding.UTF8))
@@ -51,9 +52,9 @@ namespace CanvasApp.Client
             {
                 using (var tcp = new TcpClient())
                 {
-                    var task = tcp.ConnectAsync(Session.AUTH_HOST, Session.AUTH_PORT);
+                    var task = tcp.ConnectAsync(Session.LB_HOST, Session.LB_PORT);
                     if (await Task.WhenAny(task, Task.Delay(3000)) != task)
-                        return new RegisterResult { Success = false, Message = "Không kết nối được AuthServer" };
+                        return new RegisterResult { Success = false, Message = "Không kết nối được Load Balancer" };
 
                     using (var stream = tcp.GetStream())
                     using (var reader = new StreamReader(stream, Encoding.UTF8))

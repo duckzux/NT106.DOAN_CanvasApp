@@ -44,6 +44,17 @@ namespace CanvasApp.Common
         public const string AUTH_LOGIN_RESULT = "AUTH_LOGIN_RESULT";
         public const string AUTH_REGISTER = "AUTH_REGISTER";
         public const string AUTH_REGISTER_RESULT = "AUTH_REGISTER_RESULT";
+        // Email-OTP for sign-up. Client first calls AUTH_SEND_OTP (username+email);
+        // server emails a 6-digit code and returns an OtpToken. Client then resends
+        // AUTH_REGISTER with that token + code so the server can verify before insert.
+        public const string AUTH_SEND_OTP = "AUTH_SEND_OTP";
+        public const string AUTH_SEND_OTP_RESULT = "AUTH_SEND_OTP_RESULT";
+        // Forgot-password: AUTH_FORGOT_SEND_OTP emails an OTP bound to the user's
+        // account; AUTH_RESET_PASSWORD verifies that OTP + sets the new password.
+        public const string AUTH_FORGOT_SEND_OTP = "AUTH_FORGOT_SEND_OTP";
+        public const string AUTH_FORGOT_SEND_OTP_RESULT = "AUTH_FORGOT_SEND_OTP_RESULT";
+        public const string AUTH_RESET_PASSWORD = "AUTH_RESET_PASSWORD";
+        public const string AUTH_RESET_PASSWORD_RESULT = "AUTH_RESET_PASSWORD_RESULT";
 
         // Room
         public const string ROOM_LIST = "ROOM_LIST";

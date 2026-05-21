@@ -66,9 +66,57 @@ namespace CanvasApp.Common
         public string Username { get; set; }
         public string Password { get; set; }
         public string Email { get; set; }
+        // Email-OTP gate: client must first obtain an OtpToken via AUTH_SEND_OTP
+        // and pass the matching 6-digit OtpCode back here. Server rejects the
+        // request if either is missing or invalid.
+        public string OtpToken { get; set; }
+        public string OtpCode { get; set; }
     }
 
     public class RegisterResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+    }
+
+    public class SendOtpRequest
+    {
+        public string Username { get; set; }
+        public string Email { get; set; }
+    }
+
+    public class SendOtpResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+        public string OtpToken { get; set; }
+        public int ExpiresInSeconds { get; set; }
+    }
+
+    // ── Forgot-password: client supplies only the email; server looks up the
+    // user, generates an OTP bound to that account, and emails the code.
+    public class ForgotPasswordSendOtpRequest
+    {
+        public string Email { get; set; }
+    }
+
+    public class ForgotPasswordSendOtpResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+        public string OtpToken { get; set; }
+        public int ExpiresInSeconds { get; set; }
+    }
+
+    public class ResetPasswordRequest
+    {
+        public string Email { get; set; }
+        public string NewPassword { get; set; }
+        public string OtpToken { get; set; }
+        public string OtpCode { get; set; }
+    }
+
+    public class ResetPasswordResult
     {
         public bool Success { get; set; }
         public string Message { get; set; }

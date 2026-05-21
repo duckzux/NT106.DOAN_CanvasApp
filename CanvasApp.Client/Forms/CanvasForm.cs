@@ -53,6 +53,10 @@ namespace CanvasApp.Client
         private Common.PointF _editCanvasPos;
         private System.Windows.Forms.Timer _cursorTimer;
         private bool _cursorVisible = true;
+        // Set when editing an existing text action (vs. placing new). On commit we tell
+        // peers to remove the original via DRAW_UNDO + ActionId. On cancel we restore it.
+        private string _editingActionId;
+        private DrawAction _editingOriginal;
 
         // Chat file storage: fileId → (FileName, Data)
         private readonly Dictionary<string, (string FileName, byte[] Data)> _chatFiles =
@@ -192,9 +196,23 @@ namespace CanvasApp.Client
             btnRectangle.Click += (s, e) => _currentTool = "rectangle";
             btnCircle.Click += (s, e) => _currentTool = "circle";
             btnLine.Click += (s, e) => _currentTool = "line";
-            btnArrow.Click += (s, e) => _currentTool = "arrow";
+            btnTriangle.Click += (s, e) => _currentTool = "triangle";
             btnText.Click += (s, e) => _currentTool = "text";
             chkFill.Click += (s, e) => _currentTool = "fill";
+
+            // Arrow tool — click opens a dropdown of arrow variants.
+            var arrowMenu = new ContextMenuStrip();
+            arrowMenu.Items.Add("Mũi tên đơn",        null, (s, e) => _currentTool = "arrow");
+            arrowMenu.Items.Add("Mũi tên hai đầu",    null, (s, e) => _currentTool = "arrow_double");
+            arrowMenu.Items.Add("Mũi tên đứt nét",    null, (s, e) => _currentTool = "arrow_dashed");
+            arrowMenu.Items.Add("Mũi tên đậm",        null, (s, e) => _currentTool = "arrow_thick");
+            btnArrow.Click += (s, e) =>
+            {
+                // Anchor menu to the right of the toolstrip button.
+                var btn = btnArrow;
+                var screenPt = toolStrip1.PointToScreen(new Point(btn.Bounds.Right, btn.Bounds.Top));
+                arrowMenu.Show(screenPt);
+            };
             
             btnClear.Click += async (s, e) =>
             {
@@ -492,13 +510,40 @@ namespace CanvasApp.Client
                     if (isFill) g.FillEllipse(brush, x, y, width, height);
                     else g.DrawEllipse(pen, x, y, width, height);
                 }
+                else if (baseType == "triangle")
+                {
+                    var top = new System.Drawing.PointF((p1.X + p2.X) / 2f, Math.Min(p1.Y, p2.Y));
+                    var bl  = new System.Drawing.PointF(Math.Min(p1.X, p2.X), Math.Max(p1.Y, p2.Y));
+                    var br  = new System.Drawing.PointF(Math.Max(p1.X, p2.X), Math.Max(p1.Y, p2.Y));
+                    var pts = new System.Drawing.PointF[] { top, bl, br };
+                    if (isFill) g.FillPolygon(brush, pts);
+                    else        g.DrawPolygon(pen, pts);
+                }
                 else if (baseType == "line")
                 {
                     g.DrawLine(pen, p1.X, p1.Y, p2.X, p2.Y);
                 }
-                else if (baseType == "arrow")
+                else if (baseType.StartsWith("arrow"))
                 {
-                    pen.CustomEndCap = new AdjustableArrowCap(5, 5); 
+                    // arrow / arrow_double / arrow_dashed / arrow_thick
+                    if (baseType == "arrow_double")
+                    {
+                        pen.CustomStartCap = new AdjustableArrowCap(5, 5);
+                        pen.CustomEndCap   = new AdjustableArrowCap(5, 5);
+                    }
+                    else if (baseType == "arrow_dashed")
+                    {
+                        pen.DashStyle    = DashStyle.Dash;
+                        pen.CustomEndCap = new AdjustableArrowCap(5, 5);
+                    }
+                    else if (baseType == "arrow_thick")
+                    {
+                        pen.CustomEndCap = new AdjustableArrowCap(8, 8, true);
+                    }
+                    else
+                    {
+                        pen.CustomEndCap = new AdjustableArrowCap(5, 5);
+                    }
                     g.DrawLine(pen, p1.X, p1.Y, p2.X, p2.Y);
                 }
             }
@@ -650,9 +695,35 @@ namespace CanvasApp.Client
 
             if (_currentTool == "text")
             {
+                var clickPt = ScreenToCanvas(e.X, e.Y);
+                var existing = HitTestText(clickPt);
+                if (existing != null)
+                {
+                    // Begin editing an existing text. Pull it out of local state so the
+                    // bitmap redraws without it; we put it back on cancel or replace on commit.
+                    _editingActionId = existing.ActionId;
+                    _editingOriginal = existing;
+                    _editText        = existing.Type.Substring(5);
+                    _editCanvasPos   = existing.Points[0];
+                    _currentColor    = HexToColor(existing.Color);
+                    _thickness       = Math.Max(1, existing.Thickness);
+                    _textEditActive  = true;
+                    _cursorVisible   = true;
+
+                    _history.RemoveAll(a => a.ActionId == existing.ActionId);
+                    var keep = _undoStack.Where(a => a.ActionId != existing.ActionId).ToArray();
+                    // Stack ctor reverses iteration order; pass in original push order to preserve top.
+                    _undoStack = new Stack<DrawAction>(keep.Reverse());
+                    _redoStack.Clear();
+                    RedrawCanvas();
+                    return;
+                }
+
+                _editingActionId = null;
+                _editingOriginal = null;
                 _textEditActive = true;
                 _editText = "";
-                _editCanvasPos = ScreenToCanvas(e.X, e.Y);
+                _editCanvasPos = clickPt;
                 _cursorVisible = true;
                 canvasPanel.Invalidate();
                 return;
@@ -843,7 +914,7 @@ namespace CanvasApp.Client
         private void DrawActionLocal(DrawAction action)
         {
             if (action == null || action.Points == null || _graphics == null) return;
-            if (action.Type.Contains("rectangle") || action.Type.Contains("circle") || action.Type.Contains("line") || action.Type.Contains("arrow"))
+            if (action.Type.Contains("rectangle") || action.Type.Contains("circle") || action.Type.Contains("line") || action.Type.Contains("arrow") || action.Type.Contains("triangle"))
             {
                 if (action.Points.Count < 2) return;
                 EnsureCanvasCovers(action.Points[0].X, action.Points[0].Y);
@@ -1328,7 +1399,8 @@ namespace CanvasApp.Client
             if (action.Type == "fill") return MessageType.DRAW_FILL;
             if (action.Type.StartsWith("text:")) return MessageType.DRAW_SHAPE;
             if (action.Type.Contains("rectangle") || action.Type.Contains("circle")
-                || action.Type.Contains("line") || action.Type.Contains("arrow"))
+                || action.Type.Contains("line") || action.Type.Contains("arrow")
+                || action.Type.Contains("triangle"))
                 return MessageType.DRAW_SHAPE;
             return MessageType.DRAW_END; // pen, eraser
         }
@@ -1406,8 +1478,20 @@ namespace CanvasApp.Client
         {
             _textEditActive = false;
             string text = _editText.Trim();
+            string oldId = _editingActionId;
+            _editingActionId = null;
+            _editingOriginal = null;
             _editText = "";
             canvasPanel.Invalidate();
+
+            // If we were editing existing text, tell server + peers to drop the original.
+            if (!string.IsNullOrEmpty(oldId))
+            {
+                await CanvasClient.Instance.SendAsync(new Common.Message(
+                    MessageType.DRAW_UNDO,
+                    new UndoNotification { ActionId = oldId }));
+            }
+
             if (string.IsNullOrEmpty(text)) return;
 
             var textAction = new DrawAction
@@ -1429,14 +1513,47 @@ namespace CanvasApp.Client
         private void CancelTextEdit()
         {
             _textEditActive = false;
+            // Editing existing text — restore the original locally; peers were never told it was removed.
+            if (_editingOriginal != null)
+            {
+                _history.Add(_editingOriginal);
+                _undoStack.Push(_editingOriginal);
+                RedrawCanvas();
+            }
+            _editingActionId = null;
+            _editingOriginal = null;
             _editText = "";
             canvasPanel.Invalidate();
+        }
+
+        // Hit-tests text actions in _history (top-down). Returns the topmost text whose
+        // measured rect contains the canvas point, or null.
+        private DrawAction HitTestText(Common.PointF canvasPt)
+        {
+            if (_graphics == null) return null;
+            for (int i = _history.Count - 1; i >= 0; i--)
+            {
+                var a = _history[i];
+                if (a?.Type == null || !a.Type.StartsWith("text:")) continue;
+                if (a.Points == null || a.Points.Count == 0) continue;
+                string content = a.Type.Substring(5);
+                if (string.IsNullOrEmpty(content)) continue;
+                using (var font = new Font("Arial", Math.Max(1f, a.Thickness), FontStyle.Regular, GraphicsUnit.Point))
+                {
+                    SizeF sz = _graphics.MeasureString(content, font);
+                    var rect = new RectangleF(a.Points[0].X, a.Points[0].Y, sz.Width, sz.Height);
+                    if (rect.Contains(canvasPt.X, canvasPt.Y)) return a;
+                }
+            }
+            return null;
         }
 
         // ── Shape & Brush Utilities ─────────────────────────────────────
         private bool IsShapeTool(string tool)
         {
-            return tool == "rectangle" || tool == "circle" || tool == "line" || tool == "arrow";
+            if (string.IsNullOrEmpty(tool)) return false;
+            return tool == "rectangle" || tool == "circle" || tool == "line"
+                || tool == "triangle" || tool.StartsWith("arrow");
         }
         //brush-size
         private void tscbSize_TextChanged(object sender, EventArgs e)
@@ -1458,6 +1575,11 @@ namespace CanvasApp.Client
         }
 
         private void btnAttachFile_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void btnTriangle_Click(object sender, EventArgs e)
         {
 
         }

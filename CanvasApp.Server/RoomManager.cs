@@ -594,6 +594,25 @@ namespace CanvasApp.Server
             return (seqNo, actionId);
         }
 
+        // Removes a single action by ActionId (used by text-edit / targeted delete).
+        // Returns (seqNo, actionId) of the removed action, or (-1, null) if not found.
+        public (long SeqNo, string ActionId) UndoActionById(string roomId, string actionId)
+        {
+            if (string.IsNullOrEmpty(actionId)) return (-1, null);
+            if (!_canvasState.TryGetValue(roomId, out var state)) return (-1, null);
+
+            long seqNo = -1;
+            lock (state)
+            {
+                var found = state.FirstOrDefault(a => a.ActionId == actionId);
+                if (found == null) return (-1, null);
+                seqNo = found.SeqNo;
+                state.RemoveAll(a => a.ActionId == actionId);
+            }
+            // Stale SeqNo may linger in _undoStacks; UndoLastAction silently skips missing entries.
+            return (seqNo, actionId);
+        }
+
         public void ClearCanvas(string roomId)
         {
             if (_canvasState.TryGetValue(roomId, out var state))

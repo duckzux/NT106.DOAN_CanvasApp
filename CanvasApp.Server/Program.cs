@@ -498,7 +498,14 @@ namespace CanvasApp.Server
                     case MessageType.DRAW_UNDO:
                         if (!string.IsNullOrEmpty(client.CurrentRoomId))
                         {
-                            var undone = _roomManager.UndoLastAction(client.CurrentRoomId, client.UserId);
+                            // Optional targeted undo (e.g. text-edit): payload may carry an explicit ActionId.
+                            // Fallback to the user's last action otherwise.
+                            var requestedNotif = msg.GetData<UndoNotification>();
+                            (long SeqNo, string ActionId) undone;
+                            if (requestedNotif != null && !string.IsNullOrEmpty(requestedNotif.ActionId))
+                                undone = _roomManager.UndoActionById(client.CurrentRoomId, requestedNotif.ActionId);
+                            else
+                                undone = _roomManager.UndoLastAction(client.CurrentRoomId, client.UserId);
                             if (undone.SeqNo > 0)
                             {
                                 if (_drawActionDao != null)

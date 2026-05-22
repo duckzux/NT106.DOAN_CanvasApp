@@ -148,6 +148,10 @@ namespace CanvasApp.Common
         public string SnapshotData { get; set; }
         public List<DrawAction> CanvasState { get; set; } = new List<DrawAction>();
         public List<RoomMember> Members { get; set; } = new List<RoomMember>();
+        // Chat history fetched atomically with admission — the server fetches this BEFORE
+        // adding the joiner to _roomClients so any later live broadcast contains only
+        // messages newer than the snapshot, avoiding the history-vs-live duplicate bug.
+        public List<ChatMessage> ChatHistory { get; set; } = new List<ChatMessage>();
 
         // ✅ Canvas Server addresses (returned by LoadBalancer to direct client connection)
         public string ServerHost { get; set; }
@@ -196,6 +200,40 @@ namespace CanvasApp.Common
     public class RoomListResult
     {
         public List<Room> Rooms { get; set; } = new List<Room>();
+    }
+
+    // ── Owner-only management payloads (lobby-side) ──────────────────
+    public class DeleteRoomRequest
+    {
+        public string RoomId { get; set; }
+    }
+
+    public class DeleteRoomResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+    }
+
+    public class UpdateRoomPasswordRequest
+    {
+        public string RoomId { get; set; }
+        // Empty/null means "remove password" (public room).
+        public string NewPassword { get; set; }
+    }
+
+    public class UpdateRoomPasswordResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+        public bool HasPassword { get; set; }
+    }
+
+    // Pushed via the peer mesh after the owning server applies a password change.
+    // Carries the new BCrypt hash directly so peers don't have to round-trip to DB.
+    public class PeerRoomPasswordPayload
+    {
+        public string RoomId { get; set; }
+        public string PasswordHash { get; set; }   // null/empty = password removed
     }
 
     // ── Draw action ──────────────────────────────────────────────────

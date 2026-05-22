@@ -133,5 +133,34 @@ namespace CanvasApp.AuthServer
                 return cmd.ExecuteScalar() != null;
             }
         }
+
+        /// <summary>Counts OTPs issued for <paramref name="email"/> since <paramref name="sinceUtc"/>.
+        /// Used by the rate-limiter so a single email can't trigger unlimited SMTP sends.</summary>
+        public int CountRecentByEmail(string email, DateTime sinceUtc)
+        {
+            using (var conn = new MySqlConnection(_connectionString))
+            {
+                conn.Open();
+                var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT COUNT(*) FROM email_otp_codes WHERE email = @Email AND created_at >= @Since";
+                cmd.Parameters.AddWithValue("@Email", email);
+                cmd.Parameters.AddWithValue("@Since", sinceUtc);
+                return Convert.ToInt32(cmd.ExecuteScalar());
+            }
+        }
+
+        /// <summary>Drops OTP rows that expired more than <paramref name="graceHours"/> hours ago.
+        /// Run periodically from a background task so the table doesn't grow unbounded.</summary>
+        public int DeleteExpired(int graceHours = 24)
+        {
+            using (var conn = new MySqlConnection(_connectionString))
+            {
+                conn.Open();
+                var cmd = conn.CreateCommand();
+                cmd.CommandText = "DELETE FROM email_otp_codes WHERE expires_at < @Cutoff";
+                cmd.Parameters.AddWithValue("@Cutoff", DateTime.UtcNow.AddHours(-graceHours));
+                return cmd.ExecuteNonQuery();
+            }
+        }
     }
 }

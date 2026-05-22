@@ -1,6 +1,7 @@
 using System;
 using System.Configuration;
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using CanvasApp.Common;
 
 namespace CanvasApp.AuthServer.Services
@@ -14,6 +15,20 @@ namespace CanvasApp.AuthServer.Services
     public class OtpService
     {
         private const int MaxAttempts = 5;
+        // Rate limit: at most 1 OTP per email per minute, and 5 per hour. Tuned for demo —
+        // forgot-password + register flows should never legitimately exceed these in normal use.
+        private const int RateLimitPerMinute = 1;
+        private const int RateLimitPerHour = 5;
+
+        // Basic RFC-5322-lite email check: local-part@domain.tld with non-empty parts and at
+        // least one dot in the domain. Tighter than the previous `Contains("@") && Contains(".")`
+        // which let through pathological inputs like "@.", "a@b", or "...@..".
+        private static readonly Regex _emailRegex = new Regex(
+            @"^[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}$",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static bool IsValidEmail(string email) =>
+            !string.IsNullOrWhiteSpace(email) && email.Length <= 100 && _emailRegex.IsMatch(email);
 
         private readonly OtpStore _store;
         private readonly SmtpEmailSender _mailer;
@@ -25,6 +40,25 @@ namespace CanvasApp.AuthServer.Services
             _mailer = mailer;
             _expirationMinutes = int.TryParse(ConfigurationManager.AppSettings["OtpExpirationMinutes"], out var m) && m > 0
                 ? m : 5;
+        }
+
+        // Returns null on success, or a user-facing error string when the email has hit a limit.
+        // Centralised here so both SendOtp and SendForgotPasswordOtp share identical thresholds.
+        private string CheckRateLimit(string email)
+        {
+            try
+            {
+                if (_store.CountRecentByEmail(email, DateTime.UtcNow.AddMinutes(-1)) >= RateLimitPerMinute)
+                    return "Vui lòng đợi 1 phút trước khi yêu cầu mã mới";
+                if (_store.CountRecentByEmail(email, DateTime.UtcNow.AddHours(-1)) >= RateLimitPerHour)
+                    return "Đã yêu cầu quá nhiều mã trong 1 giờ — thử lại sau";
+            }
+            catch (Exception ex)
+            {
+                // DB hiccup shouldn't block legitimate sends; log and continue.
+                Console.WriteLine($"[OtpService] rate-limit query failed: {ex.Message}");
+            }
+            return null;
         }
 
         /// <summary>
@@ -40,7 +74,7 @@ namespace CanvasApp.AuthServer.Services
                     new ForgotPasswordSendOtpResult { Success = false, Message = "Thiếu email" });
 
             var email = req.Email.Trim();
-            if (!email.Contains("@") || !email.Contains("."))
+            if (!IsValidEmail(email))
                 return new Message(MessageType.AUTH_FORGOT_SEND_OTP_RESULT,
                     new ForgotPasswordSendOtpResult { Success = false, Message = "Email không hợp lệ" });
 
@@ -48,6 +82,11 @@ namespace CanvasApp.AuthServer.Services
             if (user == null)
                 return new Message(MessageType.AUTH_FORGOT_SEND_OTP_RESULT,
                     new ForgotPasswordSendOtpResult { Success = false, Message = "Không tìm thấy tài khoản với email này" });
+
+            var rateError = CheckRateLimit(email);
+            if (rateError != null)
+                return new Message(MessageType.AUTH_FORGOT_SEND_OTP_RESULT,
+                    new ForgotPasswordSendOtpResult { Success = false, Message = rateError });
 
             var code = GenerateSixDigitCode();
             var token = Guid.NewGuid().ToString();
@@ -111,7 +150,7 @@ namespace CanvasApp.AuthServer.Services
                 return new Message(MessageType.AUTH_SEND_OTP_RESULT,
                     new SendOtpResult { Success = false, Message = "Username phải có ít nhất 3 ký tự" });
 
-            if (!email.Contains("@") || !email.Contains("."))
+            if (!IsValidEmail(email))
                 return new Message(MessageType.AUTH_SEND_OTP_RESULT,
                     new SendOtpResult { Success = false, Message = "Email không hợp lệ" });
 
@@ -120,6 +159,11 @@ namespace CanvasApp.AuthServer.Services
             if (_store.UsernameExists(username))
                 return new Message(MessageType.AUTH_SEND_OTP_RESULT,
                     new SendOtpResult { Success = false, Message = "Username đã tồn tại" });
+
+            var rateError = CheckRateLimit(email);
+            if (rateError != null)
+                return new Message(MessageType.AUTH_SEND_OTP_RESULT,
+                    new SendOtpResult { Success = false, Message = rateError });
 
             var code = GenerateSixDigitCode();
             var token = Guid.NewGuid().ToString();
@@ -173,11 +217,20 @@ namespace CanvasApp.AuthServer.Services
         }
 
         /// <summary>
-        /// Single-shot verify: matches code, locks the row on success, increments attempts on failure.
-        /// Returns (true, email) only when the token+code pair is valid and unused. The username/email
-        /// validated here MUST match what the caller supplies in the follow-up <see cref="RegisterRequest"/>.
+        /// Single-shot verify: matches code, locks the row on success (when
+        /// <paramref name="markUsedOnSuccess"/> is true), increments attempts on failure.
+        /// The username/email validated here MUST match what the caller supplies in the
+        /// follow-up <see cref="RegisterRequest"/>.
         /// </summary>
-        public (bool ok, string message, OtpStore.OtpRecord record) Verify(string token, string code, string expectedUsername, string expectedEmail)
+        /// <param name="markUsedOnSuccess">
+        /// Pass <c>false</c> when the caller needs to perform additional work (e.g. update
+        /// the password) before burning the token. The caller is then responsible for calling
+        /// <see cref="MarkUsed"/> only after that work succeeds — otherwise a DB hiccup in the
+        /// follow-up step would burn the OTP and force the user to request a fresh one.
+        /// </param>
+        public (bool ok, string message, OtpStore.OtpRecord record) Verify(
+            string token, string code, string expectedUsername, string expectedEmail,
+            bool markUsedOnSuccess = true)
         {
             if (string.IsNullOrWhiteSpace(token) || string.IsNullOrWhiteSpace(code))
                 return (false, "Thiếu mã xác thực", null);
@@ -209,8 +262,17 @@ namespace CanvasApp.AuthServer.Services
                 return (false, "Mã xác thực không đúng", null);
             }
 
-            _store.MarkUsed(token);
+            if (markUsedOnSuccess) _store.MarkUsed(token);
             return (true, "OK", rec);
+        }
+
+        /// <summary>Burn an OTP token after the caller's follow-up work has succeeded.
+        /// Idempotent — safe to call even if the token was already marked used.</summary>
+        public void MarkUsed(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token)) return;
+            try { _store.MarkUsed(token); }
+            catch (Exception ex) { Console.WriteLine($"[OtpService] MarkUsed error: {ex.Message}"); }
         }
 
         private static string GenerateSixDigitCode()

@@ -419,4 +419,284 @@ Sau đó **chuột phải `start-demo.ps1` → Run with PowerShell** → toàn b
 | Room-affinity không kick in (Client #2 về server khác) | Client gửi `ROOM_LIST` trước thay vì `ROOM_JOIN_BY_CODE` | Dùng đúng Join-by-Code flow; hoặc accept giới hạn và demo qua bước 5.3 (least-loaded thay vì affinity) |
 | `bin\Debug\` không có `.exe` | Chưa build hoặc build Release | `Ctrl+Shift+B` rebuild; check Configuration là `Debug` |
 
+---
+
+# 🔬 Demo Wireshark — bắt và đọc message thật trên dây
+
+> Mục tiêu: show được rằng client/server đang trao đổi JSON qua TCP, và 1 message đi qua LB → Auth/Canvas → response trở lại như thế nào. Phần này thường gây ấn tượng vì thầy/cô thấy traffic thật.
+
+## Bước 1. Cài Wireshark + Npcap
+
+1. Tải: https://www.wireshark.org/download.html (Windows installer)
+2. Trong quá trình cài, **chọn cả `Npcap`** — và tick **"Support raw 802.11 traffic"** + đặc biệt **"Install Npcap in WinPcap API-compatible Mode"**.
+3. Restart máy.
+
+> Vì project chạy 127.0.0.1 (loopback), bắt buộc phải có **Npcap** mới bắt được. WinPcap cũ không hỗ trợ loopback.
+
+## Bước 2. Chọn interface đúng
+
+Mở Wireshark → trang chủ liệt kê các adapter. Trên Windows với Npcap, sẽ có:
+
+```
+Ethernet
+Wi-Fi
+Adapter for loopback traffic capture     ← chọn cái này
+```
+
+Double-click **"Adapter for loopback traffic capture"** để bắt đầu sniff.
+
+## Bước 3. Lọc chỉ traffic CanvasApp
+
+Trong ô **Display Filter** (trên cùng), gõ:
+
+```
+tcp.port in {9000 9001 9002 9003 9011 9102 9103}
+```
+
+→ Chỉ hiện packet liên quan đến hệ thống.
+
+**Các filter hữu ích khác:**
+
+| Mục đích | Filter |
+|----------|--------|
+| Chỉ AUTH (qua LB → AuthServer) | `tcp.port == 9001 or tcp.port == 9011` |
+| Chỉ Canvas | `tcp.port == 9002 or tcp.port == 9003` |
+| Chỉ LB ↔ Client | `tcp.port == 9000` |
+| Chỉ peer mesh server-to-server | `tcp.port == 9102 or tcp.port == 9103` |
+| Tìm 1 loại message | `tcp contains "ROOM_JOIN"` hoặc `tcp contains "AUTH_LOGIN"` |
+| Chỉ DRAW events | `tcp contains "DRAW_"` |
+
+## Bước 4. Xem 1 phiên đầy đủ — "Follow TCP Stream"
+
+1. Bắt đầu capture (nút cá mập xanh)
+2. Chạy demo: mở Client, login, vào room, vẽ vài nét, chat
+3. Stop capture (nút vuông đỏ)
+4. **Chuột phải vào bất kỳ packet nào** trong table → **Follow → TCP Stream**
+5. Cửa sổ popup hiện toàn bộ JSON request/response của connection đó như đoạn chat:
+   - **Đỏ** = client gửi
+   - **Xanh dương** = server trả lời
+
+Ví dụ thực tế (Auth flow):
+
+```
+{"type":"AUTH_LOGIN","data":{"Username":"ndln","Password":"123456"},"token":null}
+                                                                                ← client
+{"type":"AUTH_LOGIN_RESULT","data":{"Success":true,"Token":"MTpuZGxuOjE3...","User":{"Id":1,...}}}
+                                                                                ← server
+```
+
+## Bước 5. Show từng giai đoạn để demo
+
+### Show 5.1 — Login đi qua LB → Auth
+1. Filter `tcp.port == 9000` → show client → LB
+2. Filter `tcp.port == 9001 or tcp.port == 9011` → show LB → AuthServer
+3. Follow TCP Stream cả 2 → cùng 1 message `AUTH_LOGIN` xuất hiện 2 lần (LB là proxy)
+
+### Show 5.2 — Room affinity
+1. Mở 2 client, cả 2 join cùng 1 room
+2. Filter `tcp.port == 9002` và `tcp.port == 9003`
+3. Show: cả 2 client connection persistent đều đến cùng 1 canvas server (vì room-affinity sticky)
+
+### Show 5.3 — Peer mesh relay
+1. Mở 2 client, mỗi cái connect canvas khác nhau (qua LB round-robin trước khi join room)
+2. Filter `tcp.port == 9102 or tcp.port == 9103`
+3. Show: khi 1 client gửi `CHAT_MESSAGE`, có 1 packet `PEER_RELAY` chạy giữa 2 canvas
+
+### Show 5.4 — Draw realtime
+1. Filter `tcp contains "DRAW_"`
+2. Vẽ 1 nét trong client → thấy chuỗi `DRAW_START` → `DRAW_MOVE` × N → `DRAW_END`
+3. Click `DRAW_END` packet → Follow TCP Stream → thấy `actionId` được server gán
+
+## Bước 6. Export để nộp/báo cáo
+
+- **File → Export Specified Packets** → save `.pcapng` (chỉ packet đang hiện)
+- **File → Export Packet Dissections → As Plain Text** → save `.txt` để paste vào báo cáo
+
+> 💡 Tip: dùng `-w demo.pcap` từ Wireshark CLI nếu muốn schedule capture trong khi demo.
+
+## Lưu ý khi demo
+
+- **Loopback capture đôi khi miss packet đầu**: stop capture rồi start lại nếu thấy không có gì.
+- **Filter "tcp.port"** hoạt động ở mức packet, không hỗ trợ regex nội dung. Dùng **`tcp contains "..."`** cho text search.
+- Nếu thầy hỏi "sao đọc được rõ JSON vậy?" → câu trả lời: protocol hiện tại **plaintext JSON over TCP** (chưa bật AES — xem phần dưới).
+
+---
+
+# 🔐 Demo AES — Module mã hóa AES-256 + HMAC
+
+> Project có module mã hóa **AES-256-CBC + HMAC-SHA256** built-in (Encrypt-then-MAC), sẵn sàng wire vào wire protocol. Hiện tại **chưa enable trên live traffic** — đây là feature phòng khi cần.
+
+## Vị trí code
+
+| File | Vai trò |
+|------|---------|
+| [CanvasApp.Common/Utils/AesHelper.cs](../CanvasApp.Common/Utils/AesHelper.cs) | AES-256-CBC + HMAC-SHA256 implementation |
+| [CanvasApp.Common/Utils/MessageCrypto.cs](../CanvasApp.Common/Utils/MessageCrypto.cs) | Wrap/unwrap Message.Data thành envelope `{ _enc: "...", _v: 1 }` |
+| [CanvasApp.Common/Utils/CryptoConfig.cs](../CanvasApp.Common/Utils/CryptoConfig.cs) | Process-wide key + toggle (ENV `CANVASAPP_AES_KEY`) |
+
+## Định dạng ciphertext
+
+Output `EncryptString` là Base64 của:
+
+```
+[ IV (16 bytes) ][ Ciphertext (variable, PKCS7 padded) ][ HMAC-SHA256 (32 bytes) ]
+```
+
+- **IV**: random 16 bytes mỗi lần encrypt (CBC mode)
+- **Ciphertext**: plaintext UTF-8 → AES-256-CBC
+- **HMAC**: SHA256(IV ‖ Ciphertext) — verify trước khi decrypt (Encrypt-then-MAC, chống tamper)
+- **FixedTimeEquals**: compare MAC không leak timing
+
+## Demo 1 — Chạy unit test nhỏ trong LINQPad/console
+
+Tạo file `test-aes.csx` hoặc dán vào 1 Console app tạm:
+
+```csharp
+using CanvasApp.Common.Utils;
+using System;
+
+var key = AesHelper.KeyFromBase64("z9ZvBnQfX2YlS3o4nUvE3pK9XHN0V3FwS+rJqcXyB3o=");
+
+// Encrypt
+var plaintext = "{\"type\":\"AUTH_LOGIN\",\"data\":{\"Username\":\"ndln\",\"Password\":\"secret\"}}";
+var ciphertext = AesHelper.EncryptString(plaintext, key);
+Console.WriteLine($"Encrypted ({ciphertext.Length} chars base64):");
+Console.WriteLine(ciphertext);
+
+// Decrypt
+var decrypted = AesHelper.DecryptString(ciphertext, key);
+Console.WriteLine($"\nDecrypted:\n{decrypted}");
+
+// Tamper test
+var tampered = ciphertext.Substring(0, ciphertext.Length - 4) + "AAAA";
+try { AesHelper.DecryptString(tampered, key); }
+catch (System.Security.Cryptography.CryptographicException ex)
+{
+    Console.WriteLine($"\n✅ Tampering caught: {ex.Message}");
+}
+```
+
+Output:
+```
+Encrypted (124 chars base64):
+yIAjVxqxJK6Xq7M9...+8h2QYpZCk3W0eaPfg==
+
+Decrypted:
+{"type":"AUTH_LOGIN","data":{"Username":"ndln","Password":"secret"}}
+
+✅ Tampering caught: HMAC verification failed (tampered or wrong key)
+```
+
+> **Đoạn này show cho thầy/cô**:
+> - **Mỗi lần encrypt cùng 1 plaintext ra base64 khác** → đó là vì IV random (semantic security).
+> - **Sửa 1 ký tự ciphertext → HMAC fail** → message integrity được bảo vệ.
+
+## Demo 2 — Show envelope trên Message
+
+```csharp
+using CanvasApp.Common;
+using CanvasApp.Common.Utils;
+
+var msg = new Message("CHAT_MESSAGE",
+    new { text = "hello secret world", userId = 1 },
+    token: "MTpuZGxuOjE3NDY4NjQwMDA=");
+
+Console.WriteLine("Plaintext:\n" + msg.ToJson());
+// {"type":"CHAT_MESSAGE","data":{"text":"hello secret world","userId":1},"token":"..."}
+
+MessageCrypto.EncryptInPlace(msg, CryptoConfig.Key);
+Console.WriteLine("\nEncrypted:\n" + msg.ToJson());
+// {"type":"CHAT_MESSAGE","data":{"_enc":"yIAjVx...","_v":1},"token":"..."}
+
+MessageCrypto.DecryptInPlace(msg, CryptoConfig.Key);
+Console.WriteLine("\nDecrypted back:\n" + msg.ToJson());
+```
+
+> **Điểm mấu chốt khi demo**:
+> - `type` và `token` **không mã hóa** → LoadBalancer vẫn peek được để route + AuthServer vẫn verify token được.
+> - Chỉ `data` (chứa payload nhạy cảm: password, chat content, draw actions) được mã hóa.
+> - Versioned (`_v: 1`) để sau này nâng cấp format mà vẫn backward compatible.
+
+## Demo 3 — Quản lý key qua ENV
+
+Bật terminal mới với key custom:
+
+```powershell
+$env:CANVASAPP_AES_KEY = "abcDEF1234567890..."  # Base64 32 bytes
+.\CanvasApp.Server.exe 9002
+```
+
+Show:
+- Key load thứ tự ưu tiên: ENV → config → hardcoded dev fallback
+- Banner ở startup ghi rõ key source (`env`, `config`, `default-dev`)
+
+## Demo 4 — So sánh trên Wireshark (giả sử AES được bật)
+
+Trước khi bật AES, Follow TCP Stream show:
+```
+{"type":"AUTH_LOGIN","data":{"Username":"ndln","Password":"secret123"}}
+```
+
+Sau khi bật AES, cùng request:
+```
+{"type":"AUTH_LOGIN","data":{"_enc":"yIAjVxqxJK6X...","_v":1}}
+```
+
+→ Username/Password **không đọc được trên dây** nữa. Chỉ `type` còn plaintext để LB peek route. Đó chính là **lý do thiết kế chỉ encrypt `data`**, không encrypt cả message.
+
+## Wire AES vào production (nếu cần demo full encrypted)
+
+Hiện chỉ cần sửa **AuthClient.cs** + **CanvasClient.cs** + **AuthHandler.cs** + **Program.cs** (server) — thêm 2 dòng mỗi chỗ:
+
+**Outbound (gửi)**:
+```csharp
+if (CryptoConfig.EncryptionEnabled)
+    MessageCrypto.EncryptInPlace(msg, CryptoConfig.Key);
+await writer.WriteLineAsync(msg.ToJson());
+```
+
+**Inbound (nhận)**:
+```csharp
+var msg = Message.FromJson(line);
+if (CryptoConfig.EncryptionEnabled && msg.Data != null)
+    MessageCrypto.DecryptInPlace(msg, CryptoConfig.Key);
+```
+
+> Chưa wire vào prod vì demo plaintext để thầy thấy traffic dễ hơn. Khi cần encrypt thật, uncomment 2 dòng × 4 file.
+
+---
+
+# 📊 Demo netstat — show số kết nối
+
+Dùng khi cần demo load balancing trực quan:
+
+```powershell
+# Đếm số connection client đang giữ với từng canvas server
+netstat -ano | findstr ":9002 :9003" | findstr ESTABLISHED
+```
+
+Show: client #1 đến :9002, client #2 đến :9003 (round-robin) hoặc cả 2 đến cùng 1 server (room affinity sau khi join cùng room).
+
+```powershell
+# Đếm số connection theo từng PID
+netstat -ano | findstr ":900" | Measure-Object
+```
+
+---
+
+# 🎬 Suggested demo flow (gợi ý kịch bản presentation)
+
+| Bước | Show gì | Tool |
+|------|---------|------|
+| 1 | Architecture diagram | Slides |
+| 2 | Login flow real-time | Wireshark Follow TCP Stream (port 9000 + 9001) |
+| 3 | Room create + LB sniff | Wireshark + LB console log `[ROUTE] claim on create` |
+| 4 | Multi-client join cùng room | netstat (cả 2 connect cùng port 9002) + Wireshark peer mesh |
+| 5 | Vẽ broadcast realtime | Wireshark filter `tcp contains "DRAW_"` + UI |
+| 6 | Chat duplicate fix (history vs live) | Show code + log "ChatHistory embedded in ROOM_JOIN_RESULT" |
+| 7 | Owner xóa room → sync sang server khác | Wireshark `tcp contains "PEER_ROOM_DELETE"` |
+| 8 | OTP rate limit | Spam 2 OTP liên tiếp → server từ chối lần 2 |
+| 9 | AES module | LINQPad demo encrypt/decrypt + tamper test |
+| 10 | Q&A + Show source code | VS Code |
+
 

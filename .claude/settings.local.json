@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir /b)",
+      "PowerShell(Get-Process CanvasApp.Client,CanvasApp.Server,CanvasApp.AuthServer,CanvasApp.LoadBalancer -ErrorAction SilentlyContinue)",
+      "PowerShell(Stop-Process -Force)",
+      "PowerShell(\"stopped\")"
+    ]
+  }
+}

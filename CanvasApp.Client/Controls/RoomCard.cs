@@ -8,9 +8,24 @@ namespace CanvasApp.Client
         private int currentPlayers = 0;
         private int maxPlayers = 8;
         private string _password;
+        private int _ownerId;
 
         /// <summary>ID của room ở server. Cần để ROOM_JOIN.</summary>
         public string RoomId { get; set; }
+
+        /// <summary>
+        /// UserId của chủ phòng. Khi set, RoomCard tự động ẩn/hiện nút Xóa và Đổi mật khẩu
+        /// dựa vào việc current user (Session.CurrentUser) có phải là chủ phòng hay không.
+        /// </summary>
+        public int OwnerId
+        {
+            get => _ownerId;
+            set
+            {
+                _ownerId = value;
+                UpdateOwnerControlsVisibility();
+            }
+        }
 
         public string RoomName
         {
@@ -51,6 +66,10 @@ namespace CanvasApp.Client
         }
 
         public event EventHandler OnJoinClick;
+        // Raised when the owner clicks "Xóa phòng" / "Đổi mật khẩu". LobbyForm wires these
+        // up to LobbyClient.DeleteRoomAsync / UpdateRoomPasswordAsync.
+        public event EventHandler OnDeleteClick;
+        public event EventHandler OnChangePasswordClick;
 
         public RoomCard()
         {
@@ -60,6 +79,8 @@ namespace CanvasApp.Client
                 if (currentPlayers >= maxPlayers) return;
                 OnJoinClick?.Invoke(this, e);
             };
+            btnDelete.Click += (s, e) => OnDeleteClick?.Invoke(this, e);
+            btnChangePwd.Click += (s, e) => OnChangePasswordClick?.Invoke(this, e);
         }
 
         public void JoinSuccess() => CurrentPlayers++;
@@ -68,6 +89,15 @@ namespace CanvasApp.Client
         {
             lblPlayers.Text = $"{currentPlayers}/{maxPlayers} online";
             btnJoin.Enabled = currentPlayers < maxPlayers;
+        }
+
+        // Toggle owner-only buttons. Called whenever OwnerId is (re)assigned —
+        // safe even before the form is shown because the buttons exist after InitializeComponent.
+        private void UpdateOwnerControlsVisibility()
+        {
+            bool isOwner = Session.CurrentUser != null && Session.CurrentUser.Id == _ownerId;
+            btnDelete.Visible = isOwner;
+            btnChangePwd.Visible = isOwner;
         }
 
         // Designer event stubs

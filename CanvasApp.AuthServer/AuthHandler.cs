@@ -45,9 +45,31 @@ namespace CanvasApp.AuthServer
                             gotData = true;
                             Console.WriteLine($"[+] Auth connect {endpoint}");
                         }
-                        var response = ProcessMessage(line);
-                        if (response != null)
-                            await writer.WriteLineAsync(response.ToJson());
+                        // ProcessMessage already wraps its body in try/catch and returns an
+                        // ERROR message on failure. The extra guard here is for the cases that
+                        // would otherwise leave the client hanging: ProcessMessage returning
+                        // null (shouldn't happen in current code paths, but cheap to defend
+                        // against), or the WriteLineAsync itself throwing on a flaky socket.
+                        // Without this, the AuthClient end would burn its 10s read timeout
+                        // before learning the request failed.
+                        Message response = null;
+                        try
+                        {
+                            response = ProcessMessage(line) ?? new Message(MessageType.ERROR,
+                                new { message = "Server không xử lý được yêu cầu" });
+                        }
+                        catch (Exception ex)
+                        {
+                            response = new Message(MessageType.ERROR, new { message = ex.Message });
+                        }
+                        try { await writer.WriteLineAsync(response.ToJson()); }
+                        catch (Exception ex)
+                        {
+                            // Write failed — socket likely broken. Don't try again; exit the
+                            // loop so the connection is torn down cleanly.
+                            Console.WriteLine($"[!] {endpoint} write failed: {ex.Message}");
+                            break;
+                        }
                     }
                 }
             }

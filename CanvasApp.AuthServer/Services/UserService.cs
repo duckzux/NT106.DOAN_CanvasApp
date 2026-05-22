@@ -84,7 +84,11 @@ namespace CanvasApp.AuthServer.Services
                 return new Message(MessageType.AUTH_RESET_PASSWORD_RESULT,
                     new ResetPasswordResult { Success = false, Message = "Không tìm thấy tài khoản với email này" });
 
-            var verify = _otpService.Verify(req.OtpToken, req.OtpCode, user.Username, req.Email);
+            // Don't burn the OTP yet — if UpdatePassword fails (DB hiccup), we want the user
+            // to be able to retry without re-requesting a brand-new code (which is rate-limited
+            // to 1/minute). We mark the token used only AFTER the password update succeeds.
+            var verify = _otpService.Verify(req.OtpToken, req.OtpCode, user.Username, req.Email,
+                markUsedOnSuccess: false);
             if (!verify.ok)
             {
                 Console.WriteLine($"  [UserService] RESET '{user.Username}' rejected: {verify.message}");
@@ -93,11 +97,12 @@ namespace CanvasApp.AuthServer.Services
             }
 
             var ok = _store.UpdatePassword(user.Id, req.NewPassword);
+            if (ok) _otpService.MarkUsed(req.OtpToken);
             Console.WriteLine($"  [UserService] RESET '{user.Username}' → {(ok ? "OK" : "FAILED")}");
             return new Message(MessageType.AUTH_RESET_PASSWORD_RESULT, new ResetPasswordResult
             {
                 Success = ok,
-                Message = ok ? "Đặt lại mật khẩu thành công" : "Không cập nhật được mật khẩu",
+                Message = ok ? "Đặt lại mật khẩu thành công" : "Không cập nhật được mật khẩu — vui lòng thử lại",
             });
         }
     }

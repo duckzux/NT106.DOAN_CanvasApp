@@ -40,6 +40,18 @@ namespace CanvasApp.Server
                                 var hello = msg.GetData<PeerHelloPayload>();
                                 if (hello != null)
                                 {
+                                    // Drop self-connections at the door. If the peer list is
+                                    // misconfigured (e.g. two servers share the same appsettings
+                                    // and one ends up pointing at its own peer listener), the
+                                    // accepted socket would be looping every event back to us —
+                                    // doubling chat / join notifications. Bail out before we
+                                    // record self as a "peer".
+                                    if (!string.IsNullOrEmpty(roomManager.SelfServerId)
+                                        && string.Equals(hello.ServerId, roomManager.SelfServerId, StringComparison.Ordinal))
+                                    {
+                                        Console.WriteLine($"[PEER] inbound <- {remote} dropped (self-loop, id={hello.ServerId})");
+                                        return;
+                                    }
                                     peerId = hello.ServerId;
                                     Console.WriteLine($"[PEER] inbound <- {remote} hello (id={peerId}, " +
                                                       $"rooms={hello.KnownRooms?.Count ?? 0}, " +
@@ -72,6 +84,25 @@ namespace CanvasApp.Server
                                 break;
                             }
 
+                            case MessageType.PEER_ROOM_DELETE:
+                            {
+                                // Payload is just the roomId string. Drop the room from this
+                                // server's in-memory state and push a refreshed lobby list so
+                                // local lobby clients see the card disappear immediately.
+                                var roomId = msg.GetData<string>();
+                                if (!string.IsNullOrEmpty(roomId) && roomManager.DeleteRoom(roomId))
+                                    await roomManager.BroadcastLobbyRoomListAsync();
+                                break;
+                            }
+
+                            case MessageType.PEER_ROOM_PASSWORD_UPDATED:
+                            {
+                                var payload = msg.GetData<PeerRoomPasswordPayload>();
+                                if (payload != null && roomManager.ApplyPeerPasswordHash(payload.RoomId, payload.PasswordHash))
+                                    await roomManager.BroadcastLobbyRoomListAsync();
+                                break;
+                            }
+
                             case MessageType.PEER_RELAY:
                             {
                                 var payload = msg.GetData<PeerRelayPayload>();
@@ -92,18 +123,13 @@ namespace CanvasApp.Server
                                 var payload = msg.GetData<PeerCanvasSyncPayload>();
                                 if (payload?.Actions != null && !string.IsNullOrEmpty(payload.RoomId))
                                 {
-                                    // Replay committed draw actions from the peer that we may have missed during downtime.
-                                    // Dedup by ActionId to avoid re-applying the same action twice.
-                                    var localState = roomManager.GetCanvasState(payload.RoomId);
-                                    if (localState != null)
-                                    {
-                                        foreach (var action in payload.Actions)
-                                        {
-                                            bool exists = localState.Any(a => !string.IsNullOrEmpty(action.ActionId)
-                                                                              && a.ActionId == action.ActionId);
-                                            if (!exists) localState.Add(action);
-                                        }
-                                    }
+                                    // RoomManager.ApplyPeerCanvasSync holds the state lock for the
+                                    // entire merge and dedupes by ActionId (or SeqNo fallback for
+                                    // legacy rows without an id), preventing both interleaved
+                                    // writes and unbounded duplication on repeated reconnects.
+                                    int added = roomManager.ApplyPeerCanvasSync(payload.RoomId, payload.Actions);
+                                    if (added > 0)
+                                        Console.WriteLine($"[PEER] canvas sync for {payload.RoomId}: +{added} action(s)");
                                 }
                                 break;
                             }

@@ -13,6 +13,18 @@ namespace CanvasApp.Client
     /// </summary>
     public static class AuthClient
     {
+        // Returns the line read, an empty string on graceful EOF, or null on timeout.
+        // StreamReader.ReadLineAsync has no native timeout — without this wrapper a wedged
+        // server would leave the calling form hung indefinitely.
+        private static async Task<string> ReadLineWithTimeoutAsync(StreamReader reader, int timeoutMs)
+        {
+            var readTask = reader.ReadLineAsync();
+            var done = await Task.WhenAny(readTask, Task.Delay(timeoutMs));
+            if (done != readTask) return null; // timeout
+            return readTask.Result ?? string.Empty;
+        }
+
+
         public static async Task<LoginResult> LoginAsync(string username, string password)
         {
             try
@@ -31,8 +43,12 @@ namespace CanvasApp.Client
                             new LoginRequest { Username = username, Password = password });
                         await writer.WriteLineAsync(req.ToJson());
 
-                        var line = await reader.ReadLineAsync();
-                        if (string.IsNullOrEmpty(line))
+                        // Bounded read so a stalled Auth server doesn't hang the UI thread
+                        // forever (the underlying socket has no read deadline by default).
+                        var line = await ReadLineWithTimeoutAsync(reader, 10_000);
+                        if (line == null)
+                            return new LoginResult { Success = false, Message = "Server không trả lời (timeout 10s)" };
+                        if (line.Length == 0)
                             return new LoginResult { Success = false, Message = "Server không trả lời" };
 
                         var resMsg = Message.FromJson(line);
@@ -146,8 +162,10 @@ namespace CanvasApp.Client
                             });
                         await writer.WriteLineAsync(req.ToJson());
 
-                        var line = await reader.ReadLineAsync();
-                        if (string.IsNullOrEmpty(line))
+                        var line = await ReadLineWithTimeoutAsync(reader, 10_000);
+                        if (line == null)
+                            return new ResetPasswordResult { Success = false, Message = "Server không trả lời (timeout 10s)" };
+                        if (line.Length == 0)
                             return new ResetPasswordResult { Success = false, Message = "Server không trả lời" };
 
                         var resMsg = Message.FromJson(line);
@@ -186,8 +204,10 @@ namespace CanvasApp.Client
                             });
                         await writer.WriteLineAsync(req.ToJson());
 
-                        var line = await reader.ReadLineAsync();
-                        if (string.IsNullOrEmpty(line))
+                        var line = await ReadLineWithTimeoutAsync(reader, 10_000);
+                        if (line == null)
+                            return new RegisterResult { Success = false, Message = "Server không trả lời (timeout 10s)" };
+                        if (line.Length == 0)
                             return new RegisterResult { Success = false, Message = "Server không trả lời" };
 
                         var resMsg = Message.FromJson(line);

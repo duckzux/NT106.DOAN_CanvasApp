@@ -53,6 +53,9 @@ namespace CanvasApp.Server
 
                     var persistenceQueue = new PersistenceQueue(_drawActionDao);
                     _roomManager = new RoomManager(roomDao, memberDao, persistenceQueue, snapshotDao, _drawActionDao);
+                    // Hand the chat DAO over so RoomManager.Join() can snapshot chat history
+                    // atomically with admission.
+                    _roomManager.SetChatDao(_chatDao);
 
                     var cts = new CancellationTokenSource();
                     _ = persistenceQueue.StartAsync(cts.Token);
@@ -99,10 +102,19 @@ namespace CanvasApp.Server
             //   • Peers list: CLI arg [1] (comma-sep "host:peerPort") wins, else appsettings.
             //   • ServerId: "canvas-{clientPort}" — unique per instance on the box.
             _serverId = $"canvas-{port}";
+            // Let RoomManager.ApplyFromPeerAsync drop self-loop PEER_RELAY envelopes.
+            if (_roomManager != null) _roomManager.SelfServerId = _serverId;
             int peerListenPort = port + 100;
-            var peerAddresses = args != null && args.Length > 1 && !string.IsNullOrWhiteSpace(args[1])
+            var rawPeers = args != null && args.Length > 1 && !string.IsNullOrWhiteSpace(args[1])
                 ? args[1].Split(',')
                 : LoadPeersFromConfig();
+
+            // Strip self-loop entries BEFORE PeerManager opens any outbound socket. Multiple
+            // canvas servers commonly share the same appsettings.json (e.g. both 9002 and 9003
+            // read "Peers": ["127.0.0.1:9103"]) — server 9003 would then try to connect to its
+            // own peer listener, hit the self-loop guard on the inbound side, reconnect, repeat
+            // → 100s of log lines per second. Filtering here prevents the loop entirely.
+            var peerAddresses = FilterSelfPeers(rawPeers, peerListenPort);
 
             _peerManager = new PeerManager(_serverId, peerAddresses,
                 () => new PeerHelloPayload
@@ -193,6 +205,36 @@ namespace CanvasApp.Server
                 Members = _roomManager.GetLocalMembers(roomId)
             };
             return _peerManager.PublishAsync(new Message(MessageType.PEER_MEMBER_SYNC, payload));
+        }
+
+        // Drops "host:port" entries whose port matches this server's peer-listen port AND whose
+        // host is loopback / localhost (the most common self-loop case for a school demo on one
+        // machine). Returns the remaining peer addresses unchanged.
+        private static string[] FilterSelfPeers(string[] peers, int selfPeerPort)
+        {
+            if (peers == null || peers.Length == 0) return new string[0];
+            var keep = new System.Collections.Generic.List<string>(peers.Length);
+            foreach (var raw in peers)
+            {
+                var addr = raw?.Trim();
+                if (string.IsNullOrEmpty(addr)) continue;
+
+                var parts = addr.Split(':');
+                if (parts.Length != 2 || !int.TryParse(parts[1], out var port))
+                {
+                    keep.Add(addr);
+                    continue;
+                }
+                var host = parts[0].Trim();
+                bool isLocal = host == "127.0.0.1" || host == "localhost" || host == "::1";
+                if (isLocal && port == selfPeerPort)
+                {
+                    Console.WriteLine($"[PEER] Skipping self-loop peer entry {addr}");
+                    continue;
+                }
+                keep.Add(addr);
+            }
+            return keep.ToArray();
         }
 
         private static string[] LoadPeersFromConfig()
@@ -335,8 +377,11 @@ namespace CanvasApp.Server
                     if (client.UserId == 0)
                     {
                         client.UserId = userId;
-                        var rawTok = Encoding.UTF8.GetString(Convert.FromBase64String(msg.Token));
-                        client.Username = rawTok.Split(':')[1];
+                        // Token is now "<base64-payload>.<base64-hmac>" — use the shared
+                        // extractor instead of decoding the whole string as base64, which would
+                        // throw on the '.' separator. VerifyToken has already validated the HMAC,
+                        // so this is just a payload parse.
+                        client.Username = AuthServer.UserStore.ExtractUsername(msg.Token) ?? "";
                     }
                 }
 
@@ -424,6 +469,88 @@ namespace CanvasApp.Server
                             RoomId = targetRoom.Id,
                             Password = codeReq.Password
                         });
+                        break;
+                    }
+
+                    case MessageType.ROOM_DELETE:
+                    {
+                        var delReq = msg.GetData<DeleteRoomRequest>();
+                        var room = _roomManager.GetRoom(delReq?.RoomId);
+                        if (room == null)
+                        {
+                            await client.SendAsync(new Message(MessageType.ROOM_DELETE_RESULT,
+                                new DeleteRoomResult { Success = false, Message = "Phòng không tồn tại" }));
+                            break;
+                        }
+                        if (room.OwnerId != client.UserId)
+                        {
+                            await client.SendAsync(new Message(MessageType.ROOM_DELETE_RESULT,
+                                new DeleteRoomResult { Success = false, Message = "Chỉ chủ phòng mới xóa được" }));
+                            break;
+                        }
+                        // TryDeleteRoomIfEmpty atomically rechecks "no clients" under the
+                        // same lock that Join uses, so a concurrent join can't slip in between
+                        // the empty check and the actual removal.
+                        if (!_roomManager.TryDeleteRoomIfEmpty(room.Id, out var failReason))
+                        {
+                            await client.SendAsync(new Message(MessageType.ROOM_DELETE_RESULT,
+                                new DeleteRoomResult { Success = false, Message = failReason ?? "Không thể xóa phòng" }));
+                            break;
+                        }
+                        await client.SendAsync(new Message(MessageType.ROOM_DELETE_RESULT,
+                            new DeleteRoomResult { Success = true, Message = "Đã xóa phòng" }));
+
+                        // Tell peers to drop the room too. PEER_ROOM_DELETE is intentionally
+                        // NOT a PEER_RELAY envelope — every peer must process it regardless of
+                        // whether they have local clients in the room.
+                        if (_peerManager != null)
+                            await _peerManager.PublishAsync(new Message(MessageType.PEER_ROOM_DELETE, room.Id));
+
+                        // Refresh lobby on this server. Peers run their own
+                        // BroadcastLobbyRoomListAsync after handling PEER_ROOM_DELETE.
+                        var listMsg = new Message(MessageType.ROOM_LIST_RESULT,
+                            new RoomListResult { Rooms = _roomManager.GetRoomList() });
+                        await _roomManager.BroadcastToLobbyAsync(listMsg);
+                        break;
+                    }
+
+                    case MessageType.ROOM_UPDATE_PASSWORD:
+                    {
+                        var pwdReq = msg.GetData<UpdateRoomPasswordRequest>();
+                        var room = _roomManager.GetRoom(pwdReq?.RoomId);
+                        if (room == null)
+                        {
+                            await client.SendAsync(new Message(MessageType.ROOM_UPDATE_PASSWORD_RESULT,
+                                new UpdateRoomPasswordResult { Success = false, Message = "Phòng không tồn tại" }));
+                            break;
+                        }
+                        if (room.OwnerId != client.UserId)
+                        {
+                            await client.SendAsync(new Message(MessageType.ROOM_UPDATE_PASSWORD_RESULT,
+                                new UpdateRoomPasswordResult { Success = false, Message = "Chỉ chủ phòng mới đổi được mật khẩu" }));
+                            break;
+                        }
+                        _roomManager.UpdateRoomPassword(room.Id, pwdReq.NewPassword, out var newHash);
+                        await client.SendAsync(new Message(MessageType.ROOM_UPDATE_PASSWORD_RESULT,
+                            new UpdateRoomPasswordResult
+                            {
+                                Success = true,
+                                Message = string.IsNullOrEmpty(pwdReq.NewPassword) ? "Đã bỏ mật khẩu" : "Đã đổi mật khẩu",
+                                HasPassword = !string.IsNullOrEmpty(pwdReq.NewPassword)
+                            }));
+
+                        // Tell peers about the new hash so their in-memory Room stays in sync.
+                        // We ship the hash (not the plaintext) so peers don't double-bcrypt.
+                        if (_peerManager != null)
+                        {
+                            await _peerManager.PublishAsync(new Message(MessageType.PEER_ROOM_PASSWORD_UPDATED,
+                                new PeerRoomPasswordPayload { RoomId = room.Id, PasswordHash = newHash }));
+                        }
+
+                        // Refresh lobby so the lock icon updates everywhere
+                        var listMsg = new Message(MessageType.ROOM_LIST_RESULT,
+                            new RoomListResult { Rooms = _roomManager.GetRoomList() });
+                        await _roomManager.BroadcastToLobbyAsync(listMsg);
                         break;
                     }
 
@@ -531,7 +658,7 @@ namespace CanvasApp.Server
                         if (!string.IsNullOrEmpty(client.CurrentRoomId))
                         {
                             _roomManager.ClearCanvas(client.CurrentRoomId);
-                            await _roomManager.BroadcastAsync(client.CurrentRoomId, msg);
+                            await _roomManager.BroadcastAsync(client.CurrentRoomId, msg, sender: client);
                             await PublishToPeersAsync(client.CurrentRoomId, msg);
                             _autoSave?.ForceSnapshot(client.CurrentRoomId);
                         }
@@ -550,21 +677,18 @@ namespace CanvasApp.Server
                             chat.Username = client.Username;
                             chat.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-                            // Persist asynchronously (fire-and-forget)
-                            if (_chatDao != null)
-                            {
-                                var roomId = client.CurrentRoomId;
-                                var userId = client.UserId;
-                                var text = chat.Text;
-                                Task.Run(() =>
-                                {
-                                    try { _chatDao.Insert(roomId, userId, text); }
-                                    catch (Exception ex) { Console.WriteLine($"  [DB] ChatInsert failed: {ex.Message}"); }
-                                });
-                            }
-
                             var chatMsg = new Message(MessageType.CHAT_MESSAGE, chat);
-                            await _roomManager.BroadcastAsync(client.CurrentRoomId, chatMsg);
+                            // RecordAndSnapshotChat persists + snapshots the broadcast list under
+                            // a single lock that Join() also takes around admit + history fetch.
+                            // That single lock kills the persist-before-fetch + broadcast-after-
+                            // admit duplicate window: any joiner is either (a) in the snapshot
+                            // and gets the chat live (so this chat isn't in their history fetch
+                            // because the fetch ran after the persist's lock release), or (b) not
+                            // in the snapshot and gets the chat via history (because their fetch
+                            // saw the persisted row before they were admitted). Never both.
+                            var snapshot = _roomManager.RecordAndSnapshotChat(client.CurrentRoomId, chat);
+                            foreach (var c in snapshot)
+                                await c.SendAsync(chatMsg);
                             await PublishToPeersAsync(client.CurrentRoomId, chatMsg);
                         }
                         break;
@@ -581,7 +705,8 @@ namespace CanvasApp.Server
                             fileMsg.Username = client.Username;
                             fileMsg.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-                            // Broadcast file to room; do not persist to DB
+                            // Broadcast file to room; do not persist to DB. Same echo-to-sender
+                            // semantics as CHAT_MESSAGE so the uploader's panel renders the file.
                             var fileEnvelope = new Message(MessageType.CHAT_FILE, fileMsg);
                             await _roomManager.BroadcastAsync(client.CurrentRoomId, fileEnvelope);
                             await PublishToPeersAsync(client.CurrentRoomId, fileEnvelope);
@@ -612,28 +737,15 @@ namespace CanvasApp.Server
                 joinRes.ServerPort = _serverPort;
             }
 
-            // Step 1: Send immediate join result to client (includes local + peer members at join time)
+            // Step 1: Send immediate join result. Chat history is now embedded in joinRes
+            // (snapshotted under the same logical step as admission to _roomClients), so a
+            // CHAT_MESSAGE that races a join can't show up both in history and as a live
+            // broadcast on the joiner's side.
             await client.SendAsync(new Message(MessageType.ROOM_JOIN_RESULT, joinRes));
 
             if (!joinRes.Success) return;
 
-            // Step 2: Send chat history to the joining client
-            if (_chatDao != null)
-            {
-                try
-                {
-                    var history = _chatDao.GetByRoom(joinRes.Room.Id, 50);
-                    if (history.Count > 0)
-                        await client.SendAsync(new Message(MessageType.CHAT_HISTORY,
-                            new ChatHistoryResult { Messages = history }));
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"  [DB] ChatHistory fetch failed: {ex.Message}");
-                }
-            }
-
-            // Step 3: Publish the new member to peer servers
+            // Step 2: Publish the new member to peer servers
             await PublishLocalMembersAsync(joinRes.Room.Id);
 
             // Step 4: Notify OTHER clients in the room about the new member (exclude the joining client)

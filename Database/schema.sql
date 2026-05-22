@@ -3,11 +3,14 @@ CREATE TABLE users (
   id              INT AUTO_INCREMENT PRIMARY KEY,
   username        VARCHAR(50)  NOT NULL UNIQUE,
   password_hash   VARCHAR(255) NOT NULL,
-  email           VARCHAR(100),
+  email           VARCHAR(100) NULL,                    -- NULL thay vì '' để UNIQUE bỏ qua row chưa nhập email
   avatar_color    VARCHAR(7)   DEFAULT '#3498db',
   created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   last_login_at   TIMESTAMP    NULL,
-  INDEX idx_users_username (username)
+  INDEX idx_users_username (username),
+  -- Bắt email phải duy nhất: forgot-password dùng FindByEmail() để xác định user,
+  -- nếu 2 row trùng email thì server không biết reset cho ai.
+  UNIQUE KEY uk_users_email (email)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============== ROOMS ==============
@@ -20,6 +23,7 @@ CREATE TABLE rooms (
   is_active       BOOLEAN      DEFAULT TRUE,            -- cờ xóa mềm (soft-delete)
   canvas_width    INT          DEFAULT 1920,
   canvas_height   INT          DEFAULT 1080,
+  template        VARCHAR(50)  DEFAULT 'Blank',        -- mẫu phòng (Blank, Kanban, etc.)
   invite_code     VARCHAR(8)   NULL,                    -- mã mời 6 ký tự (A-Z2-9)
   created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   updated_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -82,5 +86,19 @@ CREATE TABLE chat_messages (
   sent_at         TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE,
   FOREIGN KEY (user_id) REFERENCES users(id),
-  INDEX idx_chat_room (room_id, id)
+  INDEX idx_chat_room (room_id, id),
+  INDEX user_id (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============== EMAIL_OTP_CODES (OTP cho forgot password và registration) ==============
+CREATE TABLE email_otp_codes (
+  token           CHAR(36)     PRIMARY KEY,             -- UUID token
+  username        VARCHAR(50)  NOT NULL,                -- username để reset
+  email           VARCHAR(100) NOT NULL,
+  code_hash       VARCHAR(255) NOT NULL,                -- hashed OTP code (bcrypt hoặc SHA256)
+  expires_at      DATETIME     NOT NULL,                -- khi nào OTP hết hạn
+  attempts        INT          DEFAULT 0,               -- số lần nhập sai
+  used            TINYINT(1)   DEFAULT 0,               -- 1 = đã dùng
+  created_at      DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_otp_email (email)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

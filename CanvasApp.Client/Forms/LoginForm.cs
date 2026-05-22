@@ -5,6 +5,12 @@ namespace CanvasApp.Client
 {
     public partial class LoginForm : Form
     {
+        // Re-entrance guard. btnLogin.Enabled=false during the async login already prevents
+        // most double-clicks, but rapid sequential clicks can still queue both events in
+        // WinForms' message pump before the first handler runs Enable=false. This flag is
+        // the belt-and-braces safety net so we never open two LobbyForms.
+        private bool _loginInProgress;
+
         public LoginForm()
         {
             InitializeComponent();
@@ -36,6 +42,8 @@ namespace CanvasApp.Client
 
         private async void btnLogin_Click_1(object sender, EventArgs e)
         {
+            if (_loginInProgress) return;
+
             string username = txtUsername.TextValue;
             string password = txtPassword.TextValue;
 
@@ -46,32 +54,44 @@ namespace CanvasApp.Client
                 return;
             }
 
+            _loginInProgress = true;
             // Disable UI khi đang login
             btnLogin.Enabled = false;
             btnLogin.Text = "Đang đăng nhập...";
 
-            var result = await AuthClient.LoginAsync(username, password);
-
-            btnLogin.Enabled = true;
-            btnLogin.Text = "Đăng nhập";
-
-            if (!result.Success)
+            try
             {
-                MessageBox.Show(result.Message ?? "Đăng nhập thất bại", "Lỗi",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
+                var result = await AuthClient.LoginAsync(username, password);
+
+                if (!result.Success)
+                {
+                    MessageBox.Show(result.Message ?? "Đăng nhập thất bại", "Lỗi",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                // Lưu session
+                Session.CurrentUser = result.User;
+                Session.Token = result.Token;
+
+                // ✅ KHÔNG connect Canvas Server ở đây
+                // Connection sẽ được thực hiện khi user bấm Join phòng
+
+                var lobby = new LobbyForm();
+                lobby.Show();
+                this.Hide();
             }
-
-            // Lưu session
-            Session.CurrentUser = result.User;
-            Session.Token = result.Token;
-
-            // ✅ KHÔNG connect Canvas Server ở đây
-            // Connection sẽ được thực hiện khi user bấm Join phòng
-
-            var lobby = new LobbyForm();
-            lobby.Show();
-            this.Hide();
+            finally
+            {
+                // Restore UI even if the login or LobbyForm construction threw, so the user
+                // isn't left with a permanently-disabled "Đang đăng nhập..." button.
+                _loginInProgress = false;
+                if (!this.IsDisposed)
+                {
+                    btnLogin.Enabled = true;
+                    btnLogin.Text = "Đăng nhập";
+                }
+            }
         }
     }
 }

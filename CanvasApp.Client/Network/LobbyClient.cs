@@ -51,6 +51,19 @@ namespace CanvasApp.Client
                     new ResolveInviteCodeRequest { InviteCode = code }),
                 MessageType.RESOLVE_INVITE_CODE_RESULT);
 
+        public static Task<DeleteRoomResult> DeleteRoomAsync(string roomId) =>
+            QueryAsync<DeleteRoomResult>(
+                new Message(MessageType.ROOM_DELETE,
+                    new DeleteRoomRequest { RoomId = roomId }),
+                MessageType.ROOM_DELETE_RESULT);
+
+        // Pass null/empty newPassword to remove the password (make the room public).
+        public static Task<UpdateRoomPasswordResult> UpdateRoomPasswordAsync(string roomId, string newPassword) =>
+            QueryAsync<UpdateRoomPasswordResult>(
+                new Message(MessageType.ROOM_UPDATE_PASSWORD,
+                    new UpdateRoomPasswordRequest { RoomId = roomId, NewPassword = newPassword }),
+                MessageType.ROOM_UPDATE_PASSWORD_RESULT);
+
         /// <summary>
         /// Open TCP to LB → send one request → read lines until a message of
         /// <paramref name="terminalType"/> arrives (or stream ends) → close.

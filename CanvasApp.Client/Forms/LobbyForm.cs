@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using CanvasApp.Common;
@@ -21,7 +24,22 @@ namespace CanvasApp.Client
         // server can push room-list updates over. Poll every few seconds so deletions / password
         // changes / new rooms made by other users surface without the user manually refreshing.
         private Timer _autoRefreshTimer;
-        private bool _refreshing;
+        // Serialises every entry point that calls RefreshRoomListAsync: Load, Shown, timer,
+        // and post-action refreshes (delete / change-password). Without this, two refreshes
+        // can race — the slower one paints stale results over the fresh ones (visible flicker
+        // + ghost room cards).
+        private readonly System.Threading.SemaphoreSlim _refreshLock = new System.Threading.SemaphoreSlim(1, 1);
+
+        // Last room set we actually rendered. Used by the diff renderer to update only the
+        // cards that changed (eliminates the Clear()+rebuild flicker) and by the
+        // transient-empty guard to ignore one-off "list is suddenly empty" responses caused
+        // by load-balancing ROOM_LIST across canvas servers that briefly disagree on which
+        // rooms exist (peer-sync lag).
+        private readonly List<Room> _lastRendered = new List<Room>();
+        // RoomIds that vanished in the most recent silent poll but were present before.
+        // We only actually remove a card when the room has been missing from TWO consecutive
+        // silent polls in a row, which absorbs single-tick load-balancer inconsistencies.
+        private readonly HashSet<string> _missingOnceSilent = new HashSet<string>(StringComparer.Ordinal);
 
         public LobbyForm()
         {
@@ -30,6 +48,11 @@ namespace CanvasApp.Client
 
             UpdateGreeting();
             this.SizeChanged += (s, e) => PositionGreetingLabel();
+
+            // Without double-buffering the FlowLayoutPanel repaints on every Add/Remove,
+            // which is visible as a brief white flash even with SuspendLayout. The
+            // DoubleBuffered property is protected on the panel — set it via reflection.
+            EnableDoubleBuffering(flowLayoutPanel1);
 
             this.Load += async (s, e) =>
             {
@@ -41,6 +64,8 @@ namespace CanvasApp.Client
             this.Shown += async (s, e) =>
             {
                 // After returning from CanvasForm, lobby is shown again — refresh the list.
+                // Goes through the same semaphore as Load so a slow first refresh doesn't
+                // get overwritten by Shown's call.
                 if (this.Visible) await RefreshRoomListAsync();
             };
 
@@ -53,11 +78,10 @@ namespace CanvasApp.Client
             _autoRefreshTimer = new Timer { Interval = 3000 };
             _autoRefreshTimer.Tick += async (s, e) =>
             {
-                // Skip overlapping refreshes — a slow LB shouldn't stack up requests.
-                if (_refreshing || !this.Visible) return;
-                _refreshing = true;
-                try { await RefreshRoomListAsync(silent: true); }
-                finally { _refreshing = false; }
+                if (!this.Visible) return;
+                // tryEnter=true → if a manual refresh is already running, skip this tick rather
+                // than queueing — avoids stacking requests when the LB is slow.
+                await RefreshRoomListAsync(silent: true, tryEnter: true);
             };
             _autoRefreshTimer.Start();
         }
@@ -137,31 +161,146 @@ namespace CanvasApp.Client
 
         // ── LB queries (each one fresh short-lived TCP) ─────────────────
 
-        private async Task RefreshRoomListAsync(bool silent = false)
+        private async Task RefreshRoomListAsync(bool silent = false, bool tryEnter = false)
         {
-            var list = await LobbyClient.GetRoomListAsync();
-            if (list == null)
+            // tryEnter=true (timer): if another refresh already holds the lock, skip rather
+            // than queue. tryEnter=false (manual / post-action): wait our turn so the user's
+            // action is always reflected.
+            if (tryEnter)
             {
-                // Don't pop a dialog on background polls — a transient LB hiccup would
-                // otherwise spam the user every 3 seconds.
-                if (!silent)
-                {
-                    MessageBox.Show("Không kết nối được Load Balancer.", "Lỗi mạng",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                }
-                return;
+                if (!await _refreshLock.WaitAsync(0)) return;
             }
-            RenderRoomList(list);
+            else
+            {
+                await _refreshLock.WaitAsync();
+            }
+            try
+            {
+                var list = await LobbyClient.GetRoomListAsync();
+                if (list == null)
+                {
+                    // Don't pop a dialog on background polls — a transient LB hiccup would
+                    // otherwise spam the user every 3 seconds.
+                    if (!silent)
+                    {
+                        MessageBox.Show("Không kết nối được Load Balancer.", "Lỗi mạng",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                    return;
+                }
+                RenderRoomList(list, silent);
+            }
+            finally { _refreshLock.Release(); }
         }
 
-        private void RenderRoomList(RoomListResult result)
+        /// <summary>
+        /// Renders the room list. Two effects worth knowing about:
+        ///   • Diff-based: only the cards that actually changed (added/removed/count-updated)
+        ///     get touched. The previous Clear()+rebuild on every 3s poll was the source of
+        ///     the visible flicker in the lobby.
+        ///   • Transient-empty guard for silent polls: ROOM_LIST is load-balanced across
+        ///     canvas servers that can briefly disagree on which rooms exist (one server
+        ///     finished peer-syncing a delete, the other hasn't yet). A room is only
+        ///     actually removed from the UI when it has been missing from TWO consecutive
+        ///     silent polls — single-tick disappearances are ignored. Manual refreshes
+        ///     (Load / Shown / post-delete / post-password-change) bypass this guard so the
+        ///     user's own actions still produce immediate feedback.
+        /// </summary>
+        private void RenderRoomList(RoomListResult result, bool silent)
         {
-            flowLayoutPanel1.Controls.Clear();
-            foreach (var r in result.Rooms)
-                AddRoomCard(r);
+            var incoming = result?.Rooms ?? new List<Room>();
+            var incomingIds = new HashSet<string>(incoming.Select(r => r.Id), StringComparer.Ordinal);
+
+            // Build the set of rooms we'll actually display this tick. Starts from the
+            // server's view; on silent polls we re-add rooms that vanished only once.
+            var displayRooms = new List<Room>(incoming);
+            if (silent && _lastRendered.Count > 0)
+            {
+                var nextMissingOnce = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var prev in _lastRendered)
+                {
+                    if (incomingIds.Contains(prev.Id)) continue; // still there
+                    if (_missingOnceSilent.Contains(prev.Id)) continue; // missed twice → drop
+                    // First miss for this room — keep it visible for one more tick.
+                    displayRooms.Add(prev);
+                    nextMissingOnce.Add(prev.Id);
+                }
+                _missingOnceSilent.Clear();
+                foreach (var id in nextMissingOnce) _missingOnceSilent.Add(id);
+            }
+            else
+            {
+                _missingOnceSilent.Clear();
+            }
+
+            DiffApplyCards(displayRooms);
+
+            _lastRendered.Clear();
+            _lastRendered.AddRange(displayRooms);
         }
 
-        private void AddRoomCard(Room room)
+        /// <summary>
+        /// Updates the FlowLayoutPanel in place: removes cards whose RoomId is no longer in
+        /// <paramref name="rooms"/>, adds cards for new RoomIds, and mutates the labels on
+        /// existing cards if their count/max changed. Layout is suspended for the duration
+        /// so the user never sees an intermediate empty state.
+        /// </summary>
+        private void DiffApplyCards(List<Room> rooms)
+        {
+            flowLayoutPanel1.SuspendLayout();
+            try
+            {
+                var existing = new Dictionary<string, RoomCard>(StringComparer.Ordinal);
+                foreach (Control c in flowLayoutPanel1.Controls)
+                    if (c is RoomCard rc && !string.IsNullOrEmpty(rc.RoomId))
+                        existing[rc.RoomId] = rc;
+
+                var keep = new HashSet<string>(rooms.Select(r => r.Id), StringComparer.Ordinal);
+
+                // Remove cards that are no longer in the list (do this BEFORE adding so the
+                // panel's child collection doesn't grow temporarily).
+                foreach (var kv in existing)
+                {
+                    if (keep.Contains(kv.Key)) continue;
+                    flowLayoutPanel1.Controls.Remove(kv.Value);
+                    kv.Value.Dispose();
+                }
+
+                // Add new cards / update existing in input order so the visible ordering
+                // matches the server's list.
+                for (int i = 0; i < rooms.Count; i++)
+                {
+                    var r = rooms[i];
+                    if (existing.TryGetValue(r.Id, out var card))
+                    {
+                        // Mutate mutable fields without recreating the card so its painted
+                        // pixels stay stable — no flash, no scroll jump.
+                        if (card.RoomName != r.Name) card.RoomName = r.Name;
+                        var pwdMarker = r.HasPassword ? "***" : null;
+                        if ((card.Password ?? string.Empty) != (pwdMarker ?? string.Empty))
+                            card.Password = pwdMarker;
+                        if (card.MaxPlayers != r.MaxUsers) card.MaxPlayers = r.MaxUsers;
+                        if (card.CurrentPlayers != r.CurrentUsers) card.CurrentPlayers = r.CurrentUsers;
+                        if (card.OwnerId != r.OwnerId) card.OwnerId = r.OwnerId;
+
+                        // Move to the correct position if order changed.
+                        if (flowLayoutPanel1.Controls.GetChildIndex(card) != i)
+                            flowLayoutPanel1.Controls.SetChildIndex(card, i);
+                    }
+                    else
+                    {
+                        flowLayoutPanel1.Controls.Add(BuildRoomCard(r));
+                        flowLayoutPanel1.Controls.SetChildIndex(flowLayoutPanel1.Controls[flowLayoutPanel1.Controls.Count - 1], i);
+                    }
+                }
+            }
+            finally
+            {
+                flowLayoutPanel1.ResumeLayout();
+            }
+        }
+
+        private RoomCard BuildRoomCard(Room room)
         {
             var card = new RoomCard
             {
@@ -222,7 +361,21 @@ namespace CanvasApp.Client
                 await RefreshRoomListAsync();
             };
 
-            flowLayoutPanel1.Controls.Add(card);
+            return card;
+        }
+
+        // DoubleBuffered is protected on Control — set it on the FlowLayoutPanel via
+        // reflection. Without this, the panel repaints between Suspend/Resume layout calls
+        // and the user still sees a brief flash even though we're only mutating in place.
+        private static void EnableDoubleBuffering(Control c)
+        {
+            try
+            {
+                typeof(Control)
+                    .GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic)
+                    ?.SetValue(c, true, null);
+            }
+            catch { /* best-effort — not having double-buffering only costs a paint flash */ }
         }
 
         // Returns null if the user cancelled, "" to clear the password, or the new password.

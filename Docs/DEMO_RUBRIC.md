@@ -189,17 +189,37 @@
 ### 8.1. Code evidence
 | Cơ chế | File | Chú thích |
 |---|---|---|
-| **BCrypt** password người dùng (cost 12) | [UserStore.cs:164](../CanvasApp.AuthServer/UserStore.cs#L164), [:202](../CanvasApp.AuthServer/UserStore.cs#L202) | Hash 1 chiều + salt tự sinh |
-| **BCrypt** password phòng vẽ (cost 10) | [RoomManager.cs:201](../CanvasApp.Server/RoomManager.cs#L201), [:272](../CanvasApp.Server/RoomManager.cs#L272) | Phòng riêng tư |
-| **Token có TTL** | [TokenService.cs](../CanvasApp.AuthServer/Services/TokenService.cs) | Base64(`id:username:unixTs`), kiểm `now − issuedAt ≤ 86400` |
-| **TTL enforcement** | [UserStore.cs `VerifyToken()`](../CanvasApp.AuthServer/UserStore.cs) | Reject token > 24 h |
+| **BCrypt** password người dùng (cost 12) | [UserStore.cs Register/Login](../CanvasApp.AuthServer/UserStore.cs) | Hash 1 chiều + salt tự sinh |
+| **BCrypt** password phòng vẽ (cost 10) | [RoomManager.cs CreateRoom/UpdatePassword](../CanvasApp.Server/RoomManager.cs) | Phòng riêng tư |
+| **Token có HMAC-SHA256 signature** | [UserStore.cs IssueToken/VerifyToken](../CanvasApp.AuthServer/UserStore.cs) | Format `base64(payload).base64(HMAC)` — chống forge token |
+| **Constant-time compare** | [UserStore.cs `FixedTimeEquals`](../CanvasApp.AuthServer/UserStore.cs) | Verify MAC không leak timing |
+| **TTL enforcement 24h** | [UserStore.cs `VerifyToken()`](../CanvasApp.AuthServer/UserStore.cs) | Reject token > 24 h |
+| **Constant-time login** | [UserStore.cs `Login()`](../CanvasApp.AuthServer/UserStore.cs) | Chạy BCrypt dummy khi username không tồn tại → chống user enumeration via timing |
+| **Email-OTP BCrypt** (cost 10) | [OtpService.cs](../CanvasApp.AuthServer/Services/OtpService.cs) | OTP 6 số được hash trước khi lưu DB |
+| **OTP rate limit** | [OtpService.cs `CheckRateLimit`](../CanvasApp.AuthServer/Services/OtpService.cs) | ≤1/phút và ≤5/giờ per email |
+| **AES-256-CBC + HMAC-SHA256** (module, opt-in) | [AesHelper.cs](../CanvasApp.Common/Utils/AesHelper.cs) | Encrypt-then-MAC, IV‖CT‖MAC base64 |
+| **Message envelope** | [MessageCrypto.cs](../CanvasApp.Common/Utils/MessageCrypto.cs) | Wrap `Message.Data` thành `{_enc, _v}`, để `type` + `token` plaintext cho LB peek |
 
 ### 8.2. Demo runtime
-1. Mở phpMyAdmin → bảng `users` → cột `password_hash` cho user demo1 — copy ra Notepad → giá trị dạng `$2b$12$XYZ...` (60 ký tự, có salt) → **không thể đảo ngược về password gốc**.
-2. Login với password đúng → vào được. Login với cùng user nhưng password sai → reject. Chứng minh `Verify()` hoạt động.
-3. **(Tùy chọn) Token TTL**: Mở `Session.cs` → in `Token` ra Console.WriteLine để xem giá trị; decode Base64 → cấu trúc `id:username:timestamp`. Nếu chỉnh tay timestamp về 2 ngày trước rồi gửi → server reject `Token không hợp lệ hoặc đã hết hạn`.
+1. **BCrypt hash trong DB**: phpMyAdmin → bảng `users` → cột `password_hash` cho user demo — giá trị dạng `$2b$12$XYZ...` (60 ký tự, có salt) → **không thể đảo ngược**.
+2. **Login đúng/sai**: chứng minh `BCrypt.Verify()` hoạt động.
+3. **HMAC token**: chỉnh tay 1 byte trong base64 phần signature → server reject `Token không hợp lệ`. Decode base64 phần payload → thấy `userId:username:issuedAt` plaintext nhưng không thể forge HMAC nếu không có secret.
+4. **Constant-time login**: Stopwatch login với username không tồn tại vs sai password — cả 2 đều ~100ms (do BCrypt). Trước fix: username không tồn tại < 1ms → leak.
+5. **OTP rate limit demo**:
+   - Bấm "Gửi mã OTP" lần 1 → success
+   - Bấm lần 2 ngay → server reject "Vui lòng đợi 1 phút trước khi yêu cầu mã mới"
+   - Bấm 5 lần khác nhau trong vòng 1h → lần 6 reject "Đã yêu cầu quá nhiều mã trong 1 giờ"
+6. **AES module demo** (LINQPad script — xem [DEMO_GUIDE.md § Demo AES](DEMO_GUIDE.md)):
+   - Encrypt cùng plaintext 2 lần → ra 2 ciphertext khác nhau (do IV random)
+   - Sửa 1 ký tự ciphertext → `CryptographicException: HMAC verification failed`
+   - Show envelope `{"_enc":"...", "_v":1}` — type + token vẫn plaintext
 
-> ⚠️ Lưu ý thật thà: [AesHelper.cs](../CanvasApp.Common/Utils/AesHelper.cs) hiện là stub trống — luồng TCP **không** mã hóa AES end-to-end. Phần mã hóa thực sự đang dùng là BCrypt + Token TTL như trên.
+### 8.3. Trạng thái mã hóa wire protocol
+- **BCrypt password storage**: ✅ enabled (mọi password + OTP code đều hash trước khi insert DB)
+- **HMAC token signature**: ✅ enabled (mọi token issued sau 2026-05-22 đều có signature)
+- **AES message encryption**: ⚠️ module **built nhưng chưa wire vào wire protocol** — traffic JSON hiện vẫn plaintext. Để bật: uncomment `MessageCrypto.EncryptInPlace` ở 4 file (AuthClient, LobbyClient, CanvasClient, AuthHandler + Server.Program). Show ở Wireshark trước/sau bật → ấn tượng.
+
+> ⚠️ Lưu ý: Module AES đầy đủ trong [CanvasApp.Common/Utils/](../CanvasApp.Common/Utils/) nhưng chưa enable mặc định. Đây là lựa chọn cố ý: tắt encryption để demo dễ thấy JSON qua Wireshark. Nếu thầy muốn bật, xem [DEMO_GUIDE.md § Wire AES vào prod](DEMO_GUIDE.md).
 
 ---
 
@@ -285,6 +305,46 @@ In ra bảng dưới, đánh dấu khi đã demo xong từng mục:
 | 10 | Demo Internet | 0,5 | ☐ | 2 máy qua Radmin VPN từ 2 mạng khác nhau |
 | 11 | Load Balancing | 1,0 | ☐ | 6 screenshot ở § 11.2 |
 | **Tổng** | | **10,0** | | |
+
+---
+
+## 12. Wireshark — show traffic thật trên dây (extra credit)
+
+Phần này không bắt buộc cho rubric, nhưng rất ấn tượng và chứng minh được rằng project truyền message qua TCP thật. Chi tiết step-by-step ở [DEMO_GUIDE.md § Demo Wireshark](DEMO_GUIDE.md).
+
+### 12.1. Setup nhanh
+1. Cài **Wireshark + Npcap** (Npcap MUST có loopback support — tick "Install Npcap in WinPcap API-compatible Mode" khi cài).
+2. Mở Wireshark → chọn interface **"Adapter for loopback traffic capture"**.
+3. Filter: `tcp.port in {9000 9001 9002 9003 9011 9102 9103}`.
+
+### 12.2. 4 scenario nên show
+| # | Demo | Filter / thao tác | Bằng chứng |
+|---|------|-------------------|------------|
+| 1 | Login đi qua LB → Auth | `tcp.port == 9000 or tcp.port == 9001` → Follow TCP Stream | Cùng 1 `AUTH_LOGIN` xuất hiện 2 lần (LB là proxy plaintext) |
+| 2 | Room affinity stickiness | `tcp.port == 9002 or tcp.port == 9003` — 2 client cùng vào 1 room | Cả 2 connection persistent đều đến cùng 1 port |
+| 3 | Peer mesh PEER_RELAY | `tcp.port == 9102 or tcp.port == 9103` — chat từ client A | Có packet `{"type":"PEER_RELAY","data":{...,"Inner":{"type":"CHAT_MESSAGE",...}}}` giữa 2 canvas server |
+| 4 | Draw realtime | `tcp contains "DRAW_"` — vẽ 1 nét | Thấy chuỗi `DRAW_START` → `DRAW_MOVE` × N → `DRAW_END` + server-assigned `actionId` |
+
+### 12.3. Bảng filter chi tiết
+
+| Mục đích | Filter |
+|---|---|
+| Tất cả traffic CanvasApp | `tcp.port in {9000 9001 9002 9003 9011 9102 9103}` |
+| Chỉ LB ↔ Client | `tcp.port == 9000` |
+| Chỉ Auth pool | `tcp.port == 9001 or tcp.port == 9011` |
+| Chỉ Canvas pool | `tcp.port == 9002 or tcp.port == 9003` |
+| Peer mesh server-to-server | `tcp.port == 9102 or tcp.port == 9103` |
+| Search 1 loại message | `tcp contains "ROOM_JOIN"`, `tcp contains "AUTH_LOGIN"`, ... |
+| Chỉ DRAW events | `tcp contains "DRAW_"` |
+| Chỉ chat | `tcp contains "CHAT_MESSAGE"` |
+
+### 12.4. Mẹo follow TCP stream
+- Click 1 packet bất kỳ → **Right-click → Follow → TCP Stream**
+- Cửa sổ popup show toàn bộ JSON request/response như đoạn chat
+- **Đỏ** = client gửi, **Xanh dương** = server trả lời
+- File → Export Specified Packets → save `.pcapng` để nộp kèm báo cáo
+
+> 💡 Mẹo: chọn interface **Loopback** (Npcap) trên Wireshark để bắt traffic 127.0.0.1; chọn Wi-Fi/Ethernet để bắt traffic LAN (mục 9, 10).
 
 ---
 

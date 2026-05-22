@@ -128,6 +128,8 @@
     <Compile Include="Models\User.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Utils\AesHelper.cs" />
+    <Compile Include="Utils\CryptoConfig.cs" />
+    <Compile Include="Utils\MessageCrypto.cs" />
     <Compile Include="Utils\SnapshotHelper.cs" />
     <Compile Include="Utils\JsonHelper.cs" />
     <Compile Include="Utils\JwtHelper.cs" />

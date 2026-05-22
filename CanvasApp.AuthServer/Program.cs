@@ -1,5 +1,6 @@
 using System;
 using System.Configuration;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace CanvasApp.AuthServer
@@ -52,11 +53,27 @@ namespace CanvasApp.AuthServer
                 return;
             }
 
-            // Background OTP cleanup: drop rows whose grace window has passed so the
-            // table stays bounded. Runs every 30 minutes — first sweep happens right away.
-            _ = Task.Run(async () =>
+            // Background OTP cleanup: drop rows whose grace window has passed so the table
+            // stays bounded. Runs every 30 minutes — first sweep happens right away.
+            // Token-aware so a Ctrl+C / process-exit can interrupt the 30-minute Delay and
+            // exit cleanly between sweeps. Without this the loop would keep the process
+            // alive across shutdown, potentially mid DB-cleanup-query.
+            var shutdownCts = new CancellationTokenSource();
+            Console.CancelKeyPress += (s, e) =>
             {
-                while (true)
+                // Don't terminate immediately — let the cancellation propagate so background
+                // tasks can drain. The second Ctrl+C still kills the process via the default.
+                if (!shutdownCts.IsCancellationRequested)
+                {
+                    e.Cancel = true;
+                    shutdownCts.Cancel();
+                    Console.WriteLine("[AuthServer] Shutdown requested — draining background tasks…");
+                }
+            };
+
+            var cleanupTask = Task.Run(async () =>
+            {
+                while (!shutdownCts.IsCancellationRequested)
                 {
                     try
                     {
@@ -67,9 +84,14 @@ namespace CanvasApp.AuthServer
                     {
                         Console.WriteLine($"[OtpStore] cleanup error: {ex.Message}");
                     }
-                    await Task.Delay(TimeSpan.FromMinutes(30));
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromMinutes(30), shutdownCts.Token);
+                    }
+                    catch (OperationCanceledException) { break; }
                 }
-            });
+                Console.WriteLine("[OtpStore] cleanup loop exited");
+            }, shutdownCts.Token);
 
             var server = new AuthServer(port, store, otpStore);
             await server.StartAsync();

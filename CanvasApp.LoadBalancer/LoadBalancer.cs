@@ -39,6 +39,11 @@ namespace CanvasApp.LoadBalancer
         private readonly ConcurrentDictionary<string, ServerInfo> _roomRouting
             = new ConcurrentDictionary<string, ServerInfo>(StringComparer.OrdinalIgnoreCase);
 
+        // Serializes the (re)bind branch of RouteForRoom so two concurrent joiners for the same
+        // unmapped/unhealthy-bound room can't end up on different Canvas servers. The healthy-bound
+        // fast path stays lock-free.
+        private readonly object _routingLock = new object();
+
         public LoadBalancer(
             IEnumerable<ServerInfo> servers,
             int listenPort,
@@ -132,31 +137,66 @@ namespace CanvasApp.LoadBalancer
         {
             if (string.IsNullOrEmpty(roomId)) return PickCanvasLeastLoaded();
 
-            // Sticky lookup
-            if (_roomRouting.TryGetValue(roomId, out var bound))
+            // Fast path: healthy binding already in the table — lock-free.
+            if (_roomRouting.TryGetValue(roomId, out var bound) && bound.IsHealthy)
             {
-                if (bound.IsHealthy)
+                Console.WriteLine($"[ROUTE] room {roomId} -> {bound.Endpoint} (sticky)");
+                return bound;
+            }
+
+            // Slow path: serialize so two threads racing to (re)bind agree on one server.
+            // Without this lock the window between "TryRemove dead binding" and
+            // "GetOrAdd fresh binding" lets concurrent joiners pick different least-loaded
+            // servers — and although GetOrAdd is itself atomic, the loser of the race
+            // would have already returned its candidate before observing the winner's.
+            lock (_routingLock)
+            {
+                if (_roomRouting.TryGetValue(roomId, out bound) && bound.IsHealthy)
                 {
                     Console.WriteLine($"[ROUTE] room {roomId} -> {bound.Endpoint} (sticky)");
                     return bound;
                 }
-                // Bound server is down — drop the mapping so we can pick a fresh one
-                _roomRouting.TryRemove(roomId, out _);
-                Console.WriteLine($"[ROUTE] room {roomId} previous binding {bound.Endpoint} is DOWN; rebinding");
+
+                // Drop the dead binding AND decrement its room count — without the
+                // decrement, a server that goes down then comes back stays inflated forever.
+                if (bound != null && _roomRouting.TryRemove(roomId, out var removed))
+                {
+                    removed.DecrementRoomCount();
+                    Console.WriteLine($"[ROUTE] room {roomId} previous binding {removed.Endpoint} is DOWN; rebinding");
+                }
+
+                var picked = PickCanvasLeastLoaded();
+                if (picked == null) return null;
+                _roomRouting[roomId] = picked;
+                picked.IncrementRoomCount();
+                Console.WriteLine($"[ROUTE] room {roomId} -> {picked.Endpoint} (newly bound, healthyCount={_canvasPool.Count(s => s.IsHealthy)})");
+                return picked;
             }
+        }
 
-            var picked = PickCanvasLeastLoaded();
-            if (picked == null) return null;
-
-            // First writer wins — concurrent joins for a brand-new room all settle on one server
-            var actual = _roomRouting.GetOrAdd(roomId, picked);
-            // Only the writer that actually inserted the mapping should increment the counter
-            // (so concurrent losers don't double-count). ReferenceEquals because GetOrAdd
-            // returns the existing value if it lost the race.
-            if (ReferenceEquals(actual, picked))
-                actual.IncrementRoomCount();
-            Console.WriteLine($"[ROUTE] room {roomId} -> {actual.Endpoint} (newly bound, healthyCount={_canvasPool.Count(s => s.IsHealthy)})");
-            return actual;
+        /// <summary>
+        /// Read-only variant of <see cref="RouteForRoom"/> used by ROOM_DELETE and
+        /// ROOM_UPDATE_PASSWORD: if a healthy binding exists we return it (so the request
+        /// lands on the server that actually owns the room); if not, we fall back to a
+        /// least-loaded canvas WITHOUT claiming the binding. Claiming on a delete/update
+        /// would pollute the routing table with a server that doesn't own the room, and
+        /// future ROOM_JOINs for that roomId would stick to the wrong server permanently.
+        /// </summary>
+        private ServerInfo RouteForRoomReadOnly(string roomId)
+        {
+            if (string.IsNullOrEmpty(roomId)) return PickCanvasLeastLoaded();
+            if (_roomRouting.TryGetValue(roomId, out var bound) && bound.IsHealthy)
+            {
+                Console.WriteLine($"[ROUTE] room {roomId} -> {bound.Endpoint} (sticky, read-only)");
+                return bound;
+            }
+            // No mapping (LB restart / never-joined-locally room). Pick least-loaded for
+            // execution — the chosen server will load the room from DB and publish
+            // PEER_ROOM_DELETE / PEER_ROOM_PASSWORD_UPDATED so peers stay consistent.
+            var fallback = PickCanvasLeastLoaded();
+            if (fallback != null)
+                Console.WriteLine($"[ROUTE] room {roomId} -> {fallback.Endpoint} (no binding, read-only fallback)");
+            return fallback;
         }
 
         /// <summary>
@@ -274,14 +314,15 @@ namespace CanvasApp.LoadBalancer
                 }
                 else if (type == MessageType.ROOM_DELETE)
                 {
-                    // Sticky route the delete to the server that hosts the room so the
-                    // ownership check + memory-state cleanup happens locally. We capture
-                    // the roomId here so the response-sniffer below can unregister the
-                    // routing entry once the server confirms success.
+                    // Read-only routing: if the room is currently bound to a healthy server use
+                    // that one (so ownership check + memory cleanup happen on the actual host).
+                    // If no binding exists (LB restart, table empty), fall back to least-loaded
+                    // WITHOUT claiming the binding — claiming on a delete would lock future
+                    // ROOM_JOINs of the same roomId onto a server that doesn't own the room.
                     var delReq = SafeGetData<DeleteRoomRequest>(msg);
                     if (delReq != null && !string.IsNullOrEmpty(delReq.RoomId))
                     {
-                        target = RouteForRoom(delReq.RoomId);
+                        target = RouteForRoomReadOnly(delReq.RoomId);
                         boundRoomId = delReq.RoomId;
                     }
                     else
@@ -296,12 +337,14 @@ namespace CanvasApp.LoadBalancer
                 }
                 else if (type == MessageType.ROOM_UPDATE_PASSWORD)
                 {
-                    // Same sticky routing as ROOM_DELETE so the password update lands on the
-                    // server holding the room; the new hash then peer-syncs to the others.
+                    // Same read-only routing as ROOM_DELETE: prefer the bound server when
+                    // present, fall back without claiming. The new hash propagates via the
+                    // peer mesh (PEER_ROOM_PASSWORD_UPDATED), so a fallback target won't
+                    // leave other servers with stale credentials.
                     var pwdReq = SafeGetData<UpdateRoomPasswordRequest>(msg);
                     if (pwdReq != null && !string.IsNullOrEmpty(pwdReq.RoomId))
                     {
-                        target = RouteForRoom(pwdReq.RoomId);
+                        target = RouteForRoomReadOnly(pwdReq.RoomId);
                         boundRoomId = pwdReq.RoomId;
                     }
                     else
@@ -379,69 +422,41 @@ namespace CanvasApp.LoadBalancer
                 await backendStream.WriteAsync(firstBytes, 0, firstBytes.Length);
                 await backendStream.FlushAsync();
 
-                // ✅ For ROOM_CREATE we intercept the first response line to learn the new
-                // room's Id, then register the routing mapping immediately. Without this,
-                // a subsequent ROOM_JOIN for the freshly-created room could land on a
-                // different server (least-loaded) before any user "claims" the binding.
+                // ✅ For ROOM_CREATE we intercept the response to learn the new room's Id,
+                // then register the routing mapping immediately. Without this, a subsequent
+                // ROOM_JOIN for the freshly-created room could land on a different server
+                // (least-loaded) before any user "claims" the binding.
                 if (type == MessageType.ROOM_CREATE)
                 {
-                    try
-                    {
-                        var responseLine = await ReadOneLineAsync(backendStream, _peekMaxBytes, 10_000);
-                        if (!string.IsNullOrEmpty(responseLine))
+                    await SniffAndForwardAsync(
+                        backendStream, clientStream,
+                        expectedType: MessageType.ROOM_CREATE_RESULT,
+                        onMatched: matched =>
                         {
-                            try
+                            var newRoom = SafeGetData<Room>(matched);
+                            if (newRoom != null && !string.IsNullOrEmpty(newRoom.Id))
                             {
-                                var respMsg = Message.FromJson(responseLine);
-                                if (respMsg?.Type == MessageType.ROOM_CREATE_RESULT)
-                                {
-                                    var newRoom = SafeGetData<Room>(respMsg);
-                                    if (newRoom != null && !string.IsNullOrEmpty(newRoom.Id))
-                                    {
-                                        RegisterRoom(newRoom.Id, target);
-                                        Console.WriteLine($"[ROUTE] claim on create: {newRoom.Id} -> {target.Endpoint}");
-                                    }
-                                }
+                                RegisterRoom(newRoom.Id, target);
+                                Console.WriteLine($"[ROUTE] claim on create: {newRoom.Id} -> {target.Endpoint}");
                             }
-                            catch { /* unparseable — just forward */ }
-
-                            var respBytes = Encoding.UTF8.GetBytes(responseLine + "\n");
-                            await clientStream.WriteAsync(respBytes, 0, respBytes.Length);
-                            await clientStream.FlushAsync();
-                        }
-                    }
-                    catch (TimeoutException) { Console.WriteLine($"[LB] {clientEp} ROOM_CREATE_RESULT timeout"); }
-                    catch (Exception ex) { Console.WriteLine($"[LB] {clientEp} sniff error: {ex.Message}"); }
+                        },
+                        clientEp: clientEp);
                 }
                 else if (type == MessageType.ROOM_DELETE && !string.IsNullOrEmpty(boundRoomId))
                 {
                     // Peek the response so we only drop the routing entry on a successful
                     // delete. A failed delete (e.g. non-owner or room not empty) must keep
                     // the room's mapping intact.
-                    try
-                    {
-                        var responseLine = await ReadOneLineAsync(backendStream, _peekMaxBytes, 10_000);
-                        if (!string.IsNullOrEmpty(responseLine))
+                    await SniffAndForwardAsync(
+                        backendStream, clientStream,
+                        expectedType: MessageType.ROOM_DELETE_RESULT,
+                        onMatched: matched =>
                         {
-                            try
-                            {
-                                var respMsg = Message.FromJson(responseLine);
-                                if (respMsg?.Type == MessageType.ROOM_DELETE_RESULT)
-                                {
-                                    var res = SafeGetData<DeleteRoomResult>(respMsg);
-                                    if (res != null && res.Success)
-                                        UnregisterRoom(boundRoomId);
-                                }
-                            }
-                            catch { /* unparseable — just forward */ }
-
-                            var respBytes = Encoding.UTF8.GetBytes(responseLine + "\n");
-                            await clientStream.WriteAsync(respBytes, 0, respBytes.Length);
-                            await clientStream.FlushAsync();
-                        }
-                    }
-                    catch (TimeoutException) { Console.WriteLine($"[LB] {clientEp} ROOM_DELETE_RESULT timeout"); }
-                    catch (Exception ex) { Console.WriteLine($"[LB] {clientEp} sniff error: {ex.Message}"); }
+                            var res = SafeGetData<DeleteRoomResult>(matched);
+                            if (res != null && res.Success)
+                                UnregisterRoom(boundRoomId);
+                        },
+                        clientEp: clientEp);
                 }
 
                 var c2s = PumpAsync(client, backend, _bufferSize);
@@ -484,6 +499,77 @@ namespace CanvasApp.LoadBalancer
             {
                 try { dst.Client.Shutdown(SocketShutdown.Send); } catch { }
             }
+        }
+
+        /// <summary>
+        /// Read backend responses line-by-line until either (a) the expected RESULT type is
+        /// matched, (b) we exhaust the line budget, or (c) a read times out. Every line read
+        /// — matched or not — is forwarded to the client in order, so the wire protocol stays
+        /// intact even if the backend emits unrelated push/log lines before the actual result.
+        /// The caller's <paramref name="onMatched"/> hook runs exactly once on the matched
+        /// line so the LB can act on it (register/unregister a routing entry) without
+        /// re-parsing the stream.
+        /// </summary>
+        private async Task SniffAndForwardAsync(
+            NetworkStream backendStream,
+            NetworkStream clientStream,
+            string expectedType,
+            Action<Message> onMatched,
+            string clientEp)
+        {
+            const int MaxSniffLines = 5;
+            bool matched = false;
+            for (int i = 0; i < MaxSniffLines; i++)
+            {
+                string line;
+                try
+                {
+                    line = await ReadOneLineAsync(backendStream, _peekMaxBytes, 10_000);
+                }
+                catch (TimeoutException)
+                {
+                    Console.WriteLine($"[LB] {clientEp} {expectedType} sniff timeout after {i} line(s)");
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[LB] {clientEp} sniff error: {ex.Message}");
+                    return;
+                }
+
+                if (string.IsNullOrEmpty(line)) return; // backend closed
+
+                // Forward each line to the client in order BEFORE deciding whether to match.
+                // Doing it post-match would let an unexpected line we choose to ignore stay
+                // buffered while PumpAsync starts pumping subsequent bytes — that's how the
+                // "out-of-order response" bug used to surface.
+                var bytes = Encoding.UTF8.GetBytes(line + "\n");
+                try
+                {
+                    await clientStream.WriteAsync(bytes, 0, bytes.Length);
+                    await clientStream.FlushAsync();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[LB] {clientEp} forward error: {ex.Message}");
+                    return;
+                }
+
+                if (matched) continue;
+                try
+                {
+                    var msg = Message.FromJson(line);
+                    if (msg?.Type == expectedType)
+                    {
+                        try { onMatched?.Invoke(msg); }
+                        catch (Exception ex) { Console.WriteLine($"[LB] {clientEp} onMatched error: {ex.Message}"); }
+                        matched = true;
+                        return; // hand the rest of the conversation to PumpAsync
+                    }
+                }
+                catch { /* unparseable — already forwarded, just move on */ }
+            }
+            Console.WriteLine($"[LB] {clientEp} {expectedType} not seen after {MaxSniffLines} sniffed lines");
         }
 
         /// <summary>

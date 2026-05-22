@@ -123,18 +123,13 @@ namespace CanvasApp.Server
                                 var payload = msg.GetData<PeerCanvasSyncPayload>();
                                 if (payload?.Actions != null && !string.IsNullOrEmpty(payload.RoomId))
                                 {
-                                    // Replay committed draw actions from the peer that we may have missed during downtime.
-                                    // Dedup by ActionId to avoid re-applying the same action twice.
-                                    var localState = roomManager.GetCanvasState(payload.RoomId);
-                                    if (localState != null)
-                                    {
-                                        foreach (var action in payload.Actions)
-                                        {
-                                            bool exists = localState.Any(a => !string.IsNullOrEmpty(action.ActionId)
-                                                                              && a.ActionId == action.ActionId);
-                                            if (!exists) localState.Add(action);
-                                        }
-                                    }
+                                    // RoomManager.ApplyPeerCanvasSync holds the state lock for the
+                                    // entire merge and dedupes by ActionId (or SeqNo fallback for
+                                    // legacy rows without an id), preventing both interleaved
+                                    // writes and unbounded duplication on repeated reconnects.
+                                    int added = roomManager.ApplyPeerCanvasSync(payload.RoomId, payload.Actions);
+                                    if (added > 0)
+                                        Console.WriteLine($"[PEER] canvas sync for {payload.RoomId}: +{added} action(s)");
                                 }
                                 break;
                             }

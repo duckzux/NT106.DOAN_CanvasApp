@@ -1,12 +1,35 @@
 using System;
-using CanvasApp.Common;
+using System.Security.Cryptography;
+using System.Text;
 using MySql.Data.MySqlClient;
+using CanvasApp.Common;
 
 namespace CanvasApp.AuthServer
 {
     public class UserStore
     {
         private readonly string _connectionString;
+
+        // HMAC secret for signing auth tokens. Both AuthServer (issues) and CanvasServer
+        // (verifies) read this — set CANVASAPP_JWT_SECRET to the same value on both. The
+        // hardcoded fallback is fine for a school demo but MUST be overridden in production:
+        // without it, anyone who can read this source can forge tokens for any user.
+        private const string DefaultJwtSecret = "CanvasApp_NT106_Network_2026_dev_secret_!@#$%";
+        private static byte[] _jwtSecretCache;
+        private static byte[] GetJwtSecret()
+        {
+            if (_jwtSecretCache != null) return _jwtSecretCache;
+            var env = Environment.GetEnvironmentVariable("CANVASAPP_JWT_SECRET");
+            var raw = string.IsNullOrWhiteSpace(env) ? DefaultJwtSecret : env;
+            _jwtSecretCache = Encoding.UTF8.GetBytes(raw);
+            return _jwtSecretCache;
+        }
+
+        // Pre-computed BCrypt hash used to equalise login-failure timing when the username
+        // doesn't exist. Without this, attackers can tell registered usernames apart from
+        // non-existent ones by measuring response time (BCrypt.Verify ≈ 100ms vs early return).
+        private static readonly string _dummyBcryptHash =
+            BCrypt.Net.BCrypt.HashPassword("dummy-timing-equaliser", 12);
 
         public UserStore(string connectionString)
         {
@@ -142,6 +165,33 @@ namespace CanvasApp.AuthServer
                         // Duplicate column — already migrated, skip
                     }
                 }
+
+                // Two-step: convert empty-string emails to NULL first (so UNIQUE doesn't
+                // refuse rows that all share an empty email), then add the UNIQUE constraint.
+                // Wrapped separately so a pre-existing duplicate doesn't roll back column adds.
+                try
+                {
+                    using (var cmd = new MySqlCommand("UPDATE users SET email = NULL WHERE email = ''", conn))
+                        cmd.ExecuteNonQuery();
+                }
+                catch (Exception ex) { Console.WriteLine($"[UserStore] email empty→NULL failed: {ex.Message}"); }
+
+                try
+                {
+                    using (var cmd = new MySqlCommand("ALTER TABLE users ADD UNIQUE KEY uk_users_email (email)", conn))
+                        cmd.ExecuteNonQuery();
+                    Console.WriteLine("[UserStore] Added UNIQUE constraint on users.email");
+                }
+                catch (MySqlException ex) when (ex.Number == 1061 || ex.Number == 1068)
+                {
+                    // 1061 = duplicate key name, 1068 = multiple primary key — already migrated
+                }
+                catch (MySqlException ex) when (ex.Number == 1062)
+                {
+                    Console.WriteLine("[UserStore] ⚠ Cannot add UNIQUE(email): table already has duplicate emails. " +
+                                      "Clean up manually then restart server.");
+                }
+                catch (Exception ex) { Console.WriteLine($"[UserStore] uk_users_email migration failed: {ex.Message}"); }
             }
             Console.WriteLine("[UserStore] Schema migration complete");
         }
@@ -150,6 +200,12 @@ namespace CanvasApp.AuthServer
         {
             if (string.IsNullOrWhiteSpace(req.Username) || string.IsNullOrWhiteSpace(req.Password))
                 return new RegisterResult { Success = false, Message = "Username/password không hợp lệ" };
+
+            // Store empty/whitespace emails as SQL NULL so the UNIQUE(email) constraint
+            // doesn't refuse multiple "no-email" accounts (NULL ≠ NULL in MySQL UNIQUE).
+            object emailParam = string.IsNullOrWhiteSpace(req.Email)
+                ? (object)DBNull.Value
+                : req.Email.Trim();
 
             try
             {
@@ -160,7 +216,7 @@ namespace CanvasApp.AuthServer
                     cmd.CommandText = @"INSERT INTO users (username, email, password_hash)
                                         VALUES (@Username, @Email, @PasswordHash)";
                     cmd.Parameters.AddWithValue("@Username", req.Username);
-                    cmd.Parameters.AddWithValue("@Email", req.Email ?? "");
+                    cmd.Parameters.AddWithValue("@Email", emailParam);
                     cmd.Parameters.AddWithValue("@PasswordHash", BCrypt.Net.BCrypt.HashPassword(req.Password, 12));
                     cmd.ExecuteNonQuery();
                 }
@@ -169,7 +225,15 @@ namespace CanvasApp.AuthServer
             }
             catch (MySqlException ex) when (ex.Number == 1062)
             {
-                return new RegisterResult { Success = false, Message = "Username đã tồn tại" };
+                // 1062 = duplicate-entry on a UNIQUE index. The constraint name is in the
+                // error message ("Duplicate entry 'x' for key 'uk_users_email'"); use it to
+                // tell the user WHICH field clashed instead of always saying "username".
+                bool emailClash = ex.Message != null && ex.Message.IndexOf("email", StringComparison.OrdinalIgnoreCase) >= 0;
+                return new RegisterResult
+                {
+                    Success = false,
+                    Message = emailClash ? "Email đã được sử dụng cho tài khoản khác" : "Username đã tồn tại"
+                };
             }
             catch (Exception ex)
             {
@@ -180,8 +244,13 @@ namespace CanvasApp.AuthServer
 
         public LoginResult Login(LoginRequest req)
         {
-            if (string.IsNullOrEmpty(req.Username))
+            if (req == null || string.IsNullOrWhiteSpace(req.Username))
                 return new LoginResult { Success = false, Message = "Sai tài khoản hoặc mật khẩu" };
+
+            // Trim so accidental trailing space doesn't yield a confusing "sai tài khoản"
+            // for an otherwise-correct username (MySQL VARCHAR preserves spaces).
+            var username = req.Username.Trim();
+            var password = req.Password ?? "";
 
             try
             {
@@ -191,27 +260,34 @@ namespace CanvasApp.AuthServer
                     var cmd = conn.CreateCommand();
                     cmd.CommandText = @"SELECT id, username, email, password_hash, avatar_color
                                         FROM users WHERE username = @Username";
-                    cmd.Parameters.AddWithValue("@Username", req.Username);
+                    cmd.Parameters.AddWithValue("@Username", username);
 
                     using (var reader = cmd.ExecuteReader())
                     {
                         if (!reader.Read())
+                        {
+                            // Equalise timing with the "valid username, wrong password" path —
+                            // otherwise the response time difference leaks which usernames exist
+                            // in the DB (a timing-side-channel user enumeration attack).
+                            BCrypt.Net.BCrypt.Verify(password, _dummyBcryptHash);
                             return new LoginResult { Success = false, Message = "Sai tài khoản hoặc mật khẩu" };
+                        }
 
                         var passwordHash = reader.GetString("password_hash");
-                        if (!BCrypt.Net.BCrypt.Verify(req.Password, passwordHash))
+                        if (!BCrypt.Net.BCrypt.Verify(password, passwordHash))
                             return new LoginResult { Success = false, Message = "Sai tài khoản hoặc mật khẩu" };
 
                         var user = new User
                         {
                             Id = reader.GetInt32("id"),
                             Username = reader.GetString("username"),
-                            Email = reader.GetString("email"),
+                            // Email column is now nullable (so the UNIQUE constraint can apply
+                            // without forcing every legacy row to have a real address).
+                            Email = reader.IsDBNull(reader.GetOrdinal("email")) ? null : reader.GetString("email"),
                             AvatarColor = reader.GetString("avatar_color")
                         };
 
-                        var raw = $"{user.Id}:{user.Username}:{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
-                        var token = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(raw));
+                        var token = IssueToken(user.Id, user.Username);
 
                         // Update last login timestamp (best-effort — don't fail login on error)
                         try
@@ -263,12 +339,18 @@ namespace CanvasApp.AuthServer
                     using (var reader = cmd.ExecuteReader())
                     {
                         if (!reader.Read()) return null;
+                        // username + email are non-null here (username is UNIQUE NOT NULL;
+                        // email matched a non-NULL value in the WHERE), but avatar_color is
+                        // nullable for legacy rows — guard the read so we don't throw
+                        // InvalidOperationException mid forgot-password flow.
+                        int emailOrd = reader.GetOrdinal("email");
+                        int avatarOrd = reader.GetOrdinal("avatar_color");
                         return new User
                         {
                             Id = reader.GetInt32("id"),
                             Username = reader.GetString("username"),
-                            Email = reader.GetString("email"),
-                            AvatarColor = reader.GetString("avatar_color"),
+                            Email = reader.IsDBNull(emailOrd) ? null : reader.GetString(emailOrd),
+                            AvatarColor = reader.IsDBNull(avatarOrd) ? null : reader.GetString(avatarOrd),
                         };
                     }
                 }
@@ -306,19 +388,83 @@ namespace CanvasApp.AuthServer
             }
         }
 
+        // Token format: "<base64-payload>.<base64-hmac>"
+        // Payload: "userId:username:issuedAtUnix"
+        // HMAC:    HMAC-SHA256(payload, GetJwtSecret())
+        // Without the signature, anyone who could read this source (or guess the legacy
+        // base64-only format) was able to forge tokens for arbitrary userIds.
+        private const long TokenTtlSeconds = 24 * 60 * 60;
+
+        internal static string IssueToken(int userId, string username)
+        {
+            long issuedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var payload = Encoding.UTF8.GetBytes($"{userId}:{username}:{issuedAt}");
+            byte[] sig;
+            using (var hmac = new HMACSHA256(GetJwtSecret()))
+                sig = hmac.ComputeHash(payload);
+            return Convert.ToBase64String(payload) + "." + Convert.ToBase64String(sig);
+        }
+
         public static int VerifyToken(string token)
         {
+            if (string.IsNullOrEmpty(token)) return -1;
             try
             {
-                var raw = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(token));
+                // Legacy tokens (pre-HMAC) had no '.' — reject them outright so a stale client
+                // doesn't bypass signing. Users just re-login to get a fresh signed token.
+                var sepIdx = token.IndexOf('.');
+                if (sepIdx <= 0 || sepIdx >= token.Length - 1) return -1;
+
+                var payloadBytes = Convert.FromBase64String(token.Substring(0, sepIdx));
+                var providedSig = Convert.FromBase64String(token.Substring(sepIdx + 1));
+
+                byte[] expectedSig;
+                using (var hmac = new HMACSHA256(GetJwtSecret()))
+                    expectedSig = hmac.ComputeHash(payloadBytes);
+
+                // Constant-time compare so a fast-fail bit doesn't leak via timing.
+                if (!FixedTimeEquals(providedSig, expectedSig)) return -1;
+
+                var raw = Encoding.UTF8.GetString(payloadBytes);
                 var parts = raw.Split(':');
                 if (parts.Length < 3) return -1;
                 if (!long.TryParse(parts[2], out long issuedAt)) return -1;
-                if (DateTimeOffset.UtcNow.ToUnixTimeSeconds() - issuedAt > 86400) return -1;
-                if (int.TryParse(parts[0], out int userId)) return userId;
-                return -1;
+                long age = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - issuedAt;
+                if (age < 0 || age > TokenTtlSeconds) return -1;
+                if (!int.TryParse(parts[0], out int userId)) return -1;
+                return userId;
             }
             catch { return -1; }
+        }
+
+        private static bool FixedTimeEquals(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            int diff = 0;
+            for (int i = 0; i < a.Length; i++) diff |= a[i] ^ b[i];
+            return diff == 0;
+        }
+
+        /// <summary>
+        /// Extract the username from a verified token. Callers MUST call
+        /// <see cref="VerifyToken"/> first — this method only does payload parsing,
+        /// it does NOT re-check the HMAC signature.
+        /// Returns null if the token is malformed.
+        /// </summary>
+        public static string ExtractUsername(string token)
+        {
+            if (string.IsNullOrEmpty(token)) return null;
+            try
+            {
+                // New format: "<base64-payload>.<base64-hmac>" — payload = "userId:username:issuedAt"
+                var sepIdx = token.IndexOf('.');
+                if (sepIdx <= 0) return null;
+                var payloadBytes = Convert.FromBase64String(token.Substring(0, sepIdx));
+                var raw = Encoding.UTF8.GetString(payloadBytes);
+                var parts = raw.Split(':');
+                return parts.Length >= 2 ? parts[1] : null;
+            }
+            catch { return null; }
         }
     }
 }

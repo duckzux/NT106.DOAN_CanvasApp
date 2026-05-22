@@ -430,11 +430,16 @@ namespace CanvasApp.Server
             // mutate the Room objects in _rooms because their CurrentUsers field is also touched
             // by Join/Leave under different locks — keeping the merged view as ephemeral copies
             // avoids racing on a shared field.
+            // Snapshot peer dicts once so the per-room loop below sees a consistent set of
+            // peers — same rationale as GetMembers: a peer reconnect mid-iteration could
+            // otherwise inflate or deflate the count for some rooms but not others.
+            var perPeerSnapshot = _peerMembers.Values.ToArray();
+
             var result = new List<Room>(_rooms.Count);
             foreach (var room in _rooms.Values)
             {
                 int peerCount = 0;
-                foreach (var perPeer in _peerMembers.Values)
+                foreach (var perPeer in perPeerSnapshot)
                     if (perPeer.TryGetValue(room.Id, out var pm))
                         peerCount += pm.Count;
 
@@ -535,24 +540,35 @@ namespace CanvasApp.Server
 
             _roomClients.GetOrAdd(room.Id, _ => new List<ConnectedClient>());
 
-            // Fetch chat history BEFORE adding the joiner to the broadcast list. Otherwise
-            // a CHAT_MESSAGE that arrives between admit and history-fetch would be delivered
-            // twice — once via the live broadcast, once via the history snapshot.
+            // Atomically admit the client, fetch chat history, and snapshot the canvas under
+            // the same locks that draws and chat broadcasts use. The chat-history fetch must
+            // be INSIDE lock(clientList) (the same lock that RecordAndSnapshotChat takes for
+            // persisting + snapshotting the broadcast list) so a chat message can never be
+            // both persisted-before-fetch AND broadcast-after-admit — that's the duplicate
+            // window the previous "fetch before admit" layout had. State-list lock similarly
+            // covers admit+stateList-snapshot atomic with concurrent draws.
+            var clientList = _roomClients[room.Id];
+            var stateList = _canvasState.GetOrAdd(room.Id, _ => new List<DrawAction>());
+            List<DrawAction> deltas;
             List<ChatMessage> historySnapshot = null;
-            if (_chatDao != null)
+            lock (stateList)
             {
-                try { historySnapshot = _chatDao.GetByRoom(room.Id, 50); }
-                catch (Exception ex) { Console.WriteLine($"  [DB] ChatHistory fetch failed: {ex.Message}"); }
-            }
+                lock (clientList)
+                {
+                    if (clientList.Count >= room.MaxUsers)
+                        return new JoinRoomResult { Success = false, Message = "Phòng đầy" };
 
-            lock (_roomClients[room.Id])
-            {
-                if (_roomClients[room.Id].Count >= room.MaxUsers)
-                    return new JoinRoomResult { Success = false, Message = "Phòng đầy" };
+                    client.CurrentRoomId = room.Id;
+                    clientList.Add(client);
+                    room.CurrentUsers = clientList.Count;
 
-                client.CurrentRoomId = room.Id;
-                _roomClients[room.Id].Add(client);
-                room.CurrentUsers = _roomClients[room.Id].Count;
+                    if (_chatDao != null)
+                    {
+                        try { historySnapshot = _chatDao.GetByRoom(room.Id, 50); }
+                        catch (Exception ex) { Console.WriteLine($"  [DB] ChatHistory fetch failed: {ex.Message}"); }
+                    }
+                }
+                deltas = stateList.ToList();
             }
 
             // Room is now occupied — clear idle timer
@@ -576,13 +592,10 @@ namespace CanvasApp.Server
 
             Console.WriteLine($"  [Room] {client.Username} joined '{room.Name}' ({room.CurrentUsers}/{room.MaxUsers})");
 
-            // Build canvas join state: compressed snapshot (if any) + in-memory deltas
+            // Pull the compressed snapshot AFTER admit+snapshot so the joiner sees a coherent
+            // (snapshot, deltas) pair — the cache key is stable so the read order doesn't
+            // race with anything mutating it.
             _snapshotCache.TryGetValue(room.Id, out var snapshotData);
-            List<DrawAction> deltas;
-            if (_canvasState.TryGetValue(room.Id, out var stateList))
-                lock (stateList) { deltas = stateList.ToList(); }
-            else
-                deltas = new List<DrawAction>();
 
             return new JoinRoomResult
             {
@@ -660,16 +673,24 @@ namespace CanvasApp.Server
 
             // Then anyone connected to a peer server — deduped by UserId so the same user
             // reported by two servers (rare, but possible during reconnect races) appears once.
-            foreach (var perPeer in _peerMembers.Values)
+            // Snapshot _peerMembers.Values into an array FIRST so a peer connect/disconnect
+            // happening mid-iteration (UpdatePeerMembers / DropPeer) doesn't make the outer
+            // enumeration unstable. ConcurrentDictionary enumeration is thread-safe but does
+            // not guarantee a point-in-time view — without the snapshot, a peer reconnect
+            // could cause the same caller to see different perPeer dicts on successive
+            // iterations of the outer loop.
+            var perPeerSnapshot = _peerMembers.Values.ToArray();
+            foreach (var perPeer in perPeerSnapshot)
             {
                 if (!perPeer.TryGetValue(roomId, out var peerList)) continue;
-                lock (peerList)
+                // peerList is an immutable list reference once stored — UpdatePeerMembers
+                // REPLACES the slot with a brand-new list rather than mutating in place, so
+                // we can iterate without holding a lock. The previous lock(peerList) was
+                // belt-and-braces over a list that's already effectively read-only.
+                foreach (var m in peerList)
                 {
-                    foreach (var m in peerList)
-                    {
-                        if (!seenUserIds.Add(m.UserId)) continue;
-                        members.Add(m);
-                    }
+                    if (!seenUserIds.Add(m.UserId)) continue;
+                    members.Add(m);
                 }
             }
             return members;
@@ -713,6 +734,33 @@ namespace CanvasApp.Server
             return result;
         }
 
+        // ── Chat persist + broadcast ──────────────────────────────────
+
+        /// <summary>
+        /// Persists a chat message AND snapshots the broadcast list under one
+        /// <c>lock(clientList)</c> so the snapshot is taken atomically with the persist. Join()
+        /// takes the same lock around admit + history fetch, so a chat can never be persisted
+        /// before a joiner's history fetch AND broadcast after that joiner is admitted — which
+        /// was the duplicate window the previous "fire-and-forget Insert + concurrent
+        /// Broadcast" pair created. Callers iterate the returned snapshot to send asynchronously
+        /// (outside the lock) without risk of duplicate delivery to a newly-joined client.
+        /// </summary>
+        public ConnectedClient[] RecordAndSnapshotChat(string roomId, ChatMessage chat)
+        {
+            if (!_roomClients.TryGetValue(roomId, out var list)) return Array.Empty<ConnectedClient>();
+            ConnectedClient[] snapshot;
+            lock (list)
+            {
+                if (_chatDao != null && chat != null && !string.IsNullOrEmpty(chat.Text))
+                {
+                    try { _chatDao.Insert(roomId, chat.UserId, chat.Text); }
+                    catch (Exception ex) { Console.WriteLine($"  [DB] ChatInsert failed: {ex.Message}"); }
+                }
+                snapshot = list.ToArray();
+            }
+            return snapshot;
+        }
+
         // ── Broadcast ─────────────────────────────────────────────────
 
         public async Task BroadcastAsync(string roomId, Message msg, ConnectedClient sender = null)
@@ -743,6 +791,60 @@ namespace CanvasApp.Server
         public List<DrawAction> GetCanvasState(string roomId)
         {
             return _canvasState.TryGetValue(roomId, out var state) ? state : null;
+        }
+
+        /// <summary>
+        /// Merge actions received via PEER_CANVAS_SYNC into local canvas state. Holds the
+        /// state list lock for the whole loop so a concurrent local DRAW_END can't interleave
+        /// AddRange-style mutations. Dedupes by ActionId when present, falling back to SeqNo
+        /// otherwise — without the fallback, legacy DB rows without an ActionId would be
+        /// re-added on every peer reconnect (the previous "string.IsNullOrEmpty" guard made
+        /// the existence check return false for those rows, causing unbounded duplication).
+        /// </summary>
+        public int ApplyPeerCanvasSync(string roomId, List<DrawAction> incoming)
+        {
+            if (string.IsNullOrEmpty(roomId) || incoming == null || incoming.Count == 0) return 0;
+            if (!_canvasState.TryGetValue(roomId, out var state)) return 0;
+
+            int added = 0;
+            lock (state)
+            {
+                // Build lookup sets once instead of scanning state for every incoming action.
+                var idSet = new HashSet<string>(StringComparer.Ordinal);
+                var seqSet = new HashSet<long>();
+                foreach (var a in state)
+                {
+                    if (!string.IsNullOrEmpty(a.ActionId)) idSet.Add(a.ActionId);
+                    if (a.SeqNo > 0) seqSet.Add(a.SeqNo);
+                }
+
+                foreach (var action in incoming)
+                {
+                    bool dup;
+                    if (!string.IsNullOrEmpty(action.ActionId))
+                        dup = idSet.Contains(action.ActionId);
+                    else if (action.SeqNo > 0)
+                        dup = seqSet.Contains(action.SeqNo);
+                    else
+                        // No identifier at all — can't dedupe; skip to be safe rather than risk
+                        // unbounded duplication on every reconnect.
+                        dup = true;
+
+                    if (!dup)
+                    {
+                        // Backfill synthetic ActionId so subsequent dedupes (and client-side
+                        // undo lookups) work even if the originating server never set one.
+                        if (string.IsNullOrEmpty(action.ActionId) && action.SeqNo > 0)
+                            action.ActionId = "srv-" + action.SeqNo;
+
+                        state.Add(action);
+                        if (!string.IsNullOrEmpty(action.ActionId)) idSet.Add(action.ActionId);
+                        if (action.SeqNo > 0) seqSet.Add(action.SeqNo);
+                        added++;
+                    }
+                }
+            }
+            return added;
         }
 
         // ── Draw actions ──────────────────────────────────────────────

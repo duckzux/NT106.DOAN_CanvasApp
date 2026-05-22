@@ -3,11 +3,14 @@ CREATE TABLE users (
   id              INT AUTO_INCREMENT PRIMARY KEY,
   username        VARCHAR(50)  NOT NULL UNIQUE,
   password_hash   VARCHAR(255) NOT NULL,
-  email           VARCHAR(100),
+  email           VARCHAR(100) NULL,                    -- NULL thay vì '' để UNIQUE bỏ qua row chưa nhập email
   avatar_color    VARCHAR(7)   DEFAULT '#3498db',
   created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
   last_login_at   TIMESTAMP    NULL,
-  INDEX idx_users_username (username)
+  INDEX idx_users_username (username),
+  -- Bắt email phải duy nhất: forgot-password dùng FindByEmail() để xác định user,
+  -- nếu 2 row trùng email thì server không biết reset cho ai.
+  UNIQUE KEY uk_users_email (email)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============== ROOMS ==============

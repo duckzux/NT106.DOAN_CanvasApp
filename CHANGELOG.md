@@ -1,4 +1,150 @@
 
+# [2026-05-22] Major — Security Hardening, Race Fixes, Cross-Server Sync
+
+A multi-pass audit of the auth flow, peer mesh, and room lifecycle surfaced 10+ correctness bugs ranging from "forge any auth token" to "chat lines duplicate on each peer reconnect." This entry batches the fixes that landed in a single sweep.
+
+## 1. Auth security — token forgery, timing leak, OTP burn
+
+### 1.1 Auth token now HMAC-SHA256 signed
+**Before**: token was `base64(userId:username:issuedAt)`. No signature → anyone who could read this source (or guess the format) could forge a token for any userId. The 24h expiry was the only thing standing between an attacker and arbitrary impersonation.
+
+**After**: token = `base64(payload).base64(HMAC-SHA256(payload, secret))`.
+- Secret loads from env `CANVASAPP_JWT_SECRET`, falls back to a hardcoded dev secret labelled as such.
+- `FixedTimeEquals` constant-time MAC compare so failure timing doesn't leak.
+- Old (signature-less) tokens get rejected outright — clients re-login once after deploy.
+
+**Changes**:
+- `CanvasApp.AuthServer/UserStore.cs`: added `IssueToken`, rewrote `VerifyToken` with HMAC + expiry; added `_dummyBcryptHash` + `GetJwtSecret` + `FixedTimeEquals`.
+- `CanvasApp.AuthServer/Services/TokenService.cs`: now a thin facade over `UserStore.IssueToken/VerifyToken` so any future caller produces compatible tokens.
+
+### 1.2 Constant-time login (anti user-enumeration)
+`UserStore.Login` previously short-circuited when the username didn't exist — bcrypt-verify only ran for valid usernames. Difference in response time (~100ms vs <1ms) let attackers enumerate which usernames exist.
+
+**Fix**: when the SELECT returns 0 rows, run `BCrypt.Verify(password, _dummyBcryptHash)` so timing matches the "valid username, wrong password" path. Also `Username.Trim()` before lookup so a trailing space no longer yields "sai tài khoản" for an otherwise-correct credential.
+
+### 1.3 OTP no longer burned on UpdatePassword DB failure
+`OtpService.Verify` always called `MarkUsed` on success — including the forgot-password flow, where the actual `UpdatePassword` runs AFTER verify. A DB hiccup between Verify and UpdatePassword would burn the OTP and force the user to wait for the 1-minute rate-limit window before requesting a fresh code.
+
+**Fix**: added `markUsedOnSuccess: bool = true` parameter (defaults preserve Register's behaviour). `UserService.ResetPassword` now passes `false` and calls the new `OtpService.MarkUsed` only after `UpdatePassword` succeeds.
+
+### 1.4 OTP rate limit + cleanup
+`SendOtp` / `SendForgotPasswordOtp` had no per-email throttle — a script could spam Gmail SMTP indefinitely. The `email_otp_codes` table also had no cleanup, growing unbounded.
+
+**Fix**:
+- `OtpStore.CountRecentByEmail(email, sinceUtc)` + `OtpStore.DeleteExpired(graceHours)`.
+- `OtpService.CheckRateLimit` enforces ≤1 OTP/email/minute and ≤5/email/hour, returns a user-facing reason.
+- Background task in `AuthServer/Program.cs` runs `DeleteExpired(24h)` every 30 minutes.
+
+### 1.5 Email validation tightened
+Replaced `email.Contains("@") && email.Contains(".")` (which accepted `"@."`, `"a@b"`, etc.) with a compiled regex `^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$` and 100-char max. Applied to both register-OTP and forgot-password OTP flows.
+
+### 1.6 UNIQUE(email) DB constraint
+`users.email` had no UNIQUE — duplicate emails were possible, and `FindByEmail` would return the first matching row (effectively undefined behaviour for forgot-password).
+
+**Fix**: schema.sql declares `UNIQUE KEY uk_users_email (email)`. Migration in `UserStore.MigrateSchema`:
+1. Converts `email = ''` → `NULL` (so the constraint allows multiple "no email" rows).
+2. `ALTER TABLE users ADD UNIQUE KEY uk_users_email (email)`. Catches `1062` (existing duplicates) with a clear log line; leaves the table untouched in that case.
+3. `Register` now distinguishes 1062 by inspecting the error message for "email" → returns "Email đã được sử dụng" instead of always "Username đã tồn tại".
+
+## 2. Peer mesh — cross-server consistency
+
+### 2.1 Self-loop guard
+Two Canvas servers sharing the same `Config/appsettings.json` would both try to peer with `127.0.0.1:9103` (server B's peer port AND server B's own peer port). Server B accepting its own outbound connection caused every event to be applied twice locally — chat lines doubled, "joined room" notifications doubled, etc.
+
+**Fix**:
+- `RoomManager.SelfServerId` property + check in `ApplyFromPeerAsync`: drop envelopes where `originServerId == SelfServerId`.
+- `PeerHandler` drops inbound peer connections whose `PEER_HELLO.ServerId` matches `SelfServerId` immediately, before any state is recorded.
+
+### 2.2 PEER_ROOM_DELETE
+Owner deleting a room only affected the canvas server receiving the request; other peers kept showing the deleted room in their lobby until restart.
+
+**Fix**: new `MessageType.PEER_ROOM_DELETE`. After local delete + DB soft-delete, the originating server publishes a peer envelope; peers run `DeleteRoom` locally and re-broadcast the room list to their lobby clients.
+
+### 2.3 PEER_ROOM_PASSWORD_UPDATED
+Password updates only mutated the originating server's in-memory `Room.PasswordHash`. Peers verified joins against stale hashes — wrong-password rejections after a legitimate reset.
+
+**Fix**: new `MessageType.PEER_ROOM_PASSWORD_UPDATED` carrying `{ RoomId, PasswordHash }`. Originating server publishes after a successful update; peers apply via `RoomManager.ApplyPeerPasswordHash`, which mutates the in-memory hash under the same `lock(room)` that `Resolve`/`Join` take when reading it.
+
+### 2.4 PEER_CANVAS_SYNC dedupe rewritten
+Previous dedupe loop: `localState.Any(a => !string.IsNullOrEmpty(action.ActionId) && a.ActionId == action.ActionId)`. When the incoming action's `ActionId` was null (legacy DB rows), the guard short-circuited to `false` → the action was added on every reconnect, growing the in-memory state unboundedly.
+
+**Fix**: `RoomManager.ApplyPeerCanvasSync` builds HashSet lookups for both `ActionId` and `SeqNo`, dedupes by id when present and seq otherwise, skips actions with neither identifier, and backfills `srv-{seqNo}` ActionIds on insert. The whole merge runs under `lock(state)` so a local DRAW_END can't interleave.
+
+## 3. Race conditions
+
+### 3.1 `BroadcastAsync` serialised per-client
+`StreamWriter.WriteLineAsync` is not thread-safe. Concurrent draw + chat broadcasts to the same client could interleave bytes mid-line → client `StreamReader` saw malformed JSON and threw.
+
+**Fix**: `ConnectedClient._sendLock` (SemaphoreSlim) wraps every `WriteLineAsync`.
+
+### 3.2 Atomic delete vs. join
+`ROOM_DELETE` handler checked `IsRoomEmpty(room.Id)` then called `DeleteRoom`. Between the check and the call, a concurrent `Join` could insert into `_roomClients[roomId]`, leaving the joiner attached to a list that was about to be discarded.
+
+**Fix**:
+- `RoomManager.TryDeleteRoomIfEmpty` rechecks `list.Count == 0` UNDER `lock(list)` — the same lock Join uses to push the new client. A race-winning Join blocks the delete; a race-winning delete leaves the Join with a "phòng đang được xóa" reject.
+- `_deleting: ConcurrentDictionary<string, byte>` guards `Join` so a slower Join still sees the delete-in-progress flag.
+
+### 3.3 Atomic password update
+`UpdateRoomPassword` mutated `HasPassword` and `PasswordHash` as two separate assignments. A `Resolve` or `Join` running concurrently could observe `HasPassword=true, PasswordHash=null` → `BCrypt.Verify(req.Password, null)` throws.
+
+**Fix**: write both fields under `lock(room)`. `Resolve` and `Join` snapshot the pair under the same lock before verifying.
+
+### 3.4 EnsureCanvasLoaded race
+Previous logic `if (!_canvasLoaded.TryAdd(roomId, true)) return;` short-circuited the loser of the race immediately — but the winner hadn't finished loading deltas from DB yet. The loser then read an empty `_canvasState` and shipped a blank `JoinRoomResult.CanvasState` to the joining client.
+
+**Fix**: per-room `_canvasLoadLocks: ConcurrentDictionary<string, object>`. Fast path: `_canvasLoaded.ContainsKey(roomId)`. Slow path: `lock(gate)` + recheck + load + set the loaded-flag LAST so late readers either short-circuit on the populated state or block until the load completes.
+
+### 3.5 Chat history vs. live broadcast
+The previous order was: `Join()` admits the client → server sends `ROOM_JOIN_RESULT` → server fetches & sends `CHAT_HISTORY`. Any `CHAT_MESSAGE` arriving in that window was both broadcast live (joiner already in `_roomClients`) AND included in the history fetch — joiner saw it twice.
+
+**Fix**:
+- `JoinRoomResult.ChatHistory` field added.
+- `RoomManager.SetChatDao` injects `ChatMessageDAO`; `Join` fetches the chat history snapshot BEFORE adding the client to `_roomClients`. Live broadcasts that occur after admission are strictly newer than the snapshot.
+- The standalone `CHAT_HISTORY` message is no longer sent by the server (model retained for now).
+
+## 4. LoadBalancer
+
+### 4.1 `_roomRouting` cleanup on delete
+`ROOM_DELETE` sniff didn't update LB's routing table — the deleted roomId stayed mapped and the chosen server's `RoomCount` never decremented. Over a long demo, least-loaded picks would skew toward servers that hadn't hosted any deleted rooms.
+
+**Fix**: LB now sticky-routes `ROOM_DELETE` and `ROOM_UPDATE_PASSWORD` (so the delete lands on the server that hosts the room), peeks the response, and calls `UnregisterRoom(roomId)` on a successful `ROOM_DELETE_RESULT` — which removes the mapping and decrements RoomCount on the bound server.
+
+### 4.2 Sender exclusion + chat self-echo
+`CHAT_MESSAGE` broadcast used `sender: client` — the sender's own message never came back. The client comment `// Không append local — server sẽ broadcast lại cho mình thấy` documented the expectation: a single client would never see its own chat lines until rejoining.
+
+**Fix**: dropped sender exclusion for chat. Combined with the self-loop guard (§ 2.1), every connected client (including sender) sees exactly one copy per message regardless of peer-mesh topology.
+
+## 5. UX
+
+### 5.1 Lobby auto-refresh
+Lobby clients use short-lived TCP — there's no persistent socket the server can push room-list updates over. Created rooms / deleted rooms / changed passwords were invisible until the user manually refreshed.
+
+**Fix**: `LobbyForm` runs a 3-second polling timer (`silent: true, tryEnter: true` — uses a SemaphoreSlim so a slow LB doesn't stack requests). The same semaphore serialises Load / Shown / post-action refreshes so they never overwrite each other's rendering.
+
+### 5.2 Room owner controls
+RoomCard now shows "Đổi mật khẩu" + "Xóa phòng" buttons — only when `Session.CurrentUser.Id == room.OwnerId`. Wired via `OnDeleteClick`/`OnChangePasswordClick` events to LobbyForm, which calls new `LobbyClient.DeleteRoomAsync` / `LobbyClient.UpdateRoomPasswordAsync` short-lived queries.
+
+## 6. AES module (built, not wired)
+
+`AesHelper.cs` was previously an empty stub, but `MessageCrypto.cs` and `CryptoConfig.cs` referenced methods on it that didn't exist (and weren't compiled into `CanvasApp.Common.csproj` either) — README claimed "AES-256 message encryption" while the wire was actually plaintext JSON.
+
+**Fix**: implemented `AesHelper` with AES-256-CBC + HMAC-SHA256 (Encrypt-then-MAC); included `MessageCrypto.cs` + `CryptoConfig.cs` in the csproj. The module is now compileable and testable, but **not yet wired into the live wire protocol** — to enable encryption, uncomment the `MessageCrypto.EncryptInPlace` lines in `AuthClient.cs`, `LobbyClient.cs`, `CanvasClient.cs` send paths and the matching `DecryptInPlace` in the server message handlers. Demo flow documented in [Docs/DEMO_GUIDE.md](Docs/DEMO_GUIDE.md).
+
+## 7. Documentation
+
+- `Docs/explain/all_message.md` — exhaustive catalogue of every `MessageType`: sender → receiver, transport (short-lived vs. persistent vs. peer mesh), JSON payload examples.
+- `Docs/DEMO_GUIDE.md` — appended Wireshark demo (4 sniff scenarios), AES demo (encrypt/decrypt/tamper test), netstat load-balancing demo, suggested 10-step presentation flow.
+- `Database/schema.sql` — added missing tables (`email_otp_codes`, `template` column in rooms, UNIQUE email constraint), plus `reset.sql` for wiping demo data.
+
+## Trade-offs
+
+- **Existing tokens invalidated**: anyone holding a pre-HMAC token must re-login. Demo flow needs a fresh login pass after deploy.
+- **Lobby polling load**: 3s timer × N lobby clients hits the LB. Acceptable for school demo scale; replace with a long-poll or WebSocket-style push if scaling up.
+- **AES is opt-in**: traffic remains plaintext until wired. Documented honestly rather than removing the module entirely, since the README/Architecture docs reference encryption.
+- **Old data with duplicate emails**: UNIQUE migration logs a warning but doesn't auto-resolve. Operator must clean up manually before the constraint applies.
+
+---
+
 # [2026-05-21] Fix — Room Stickiness Broken by Shared LB Socket; Add Routing Table
 
 Two clients joining the same room landed on different Canvas Servers and could not see each other's strokes. The "Connect-on-Join" rewrite from 2026-05-20 fixed the *direct-connect* hop but kept a persistent LB socket in the lobby, which silently re-introduced the original bug.

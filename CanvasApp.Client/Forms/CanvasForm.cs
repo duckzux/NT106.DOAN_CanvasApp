@@ -111,7 +111,14 @@ namespace CanvasApp.Client
                 if (!string.IsNullOrEmpty(action.ActionId))
                     _history.RemoveAll(a => a.ActionId == action.ActionId);
                 RedrawCanvas();
-                await CanvasClient.Instance.SendAsync(new Common.Message(MessageType.DRAW_UNDO));
+                // Send the ActionId explicitly so the server takes the targeted UndoActionById
+                // path instead of falling back to UndoLastAction. The fallback usually picks the
+                // same action, but if the client's _undoStack drifted out of sync with the
+                // server's _undoStacks (e.g. a draw action wasn't acknowledged), the fallback
+                // would undo a different action than the one this button click just removed
+                // from the local history — peers would then see a different stroke disappear.
+                await CanvasClient.Instance.SendAsync(new Common.Message(MessageType.DRAW_UNDO,
+                    new UndoNotification { ActionId = action.ActionId }));
             };
             btnRedo.Click += async (s, e) =>
             {
@@ -1387,6 +1394,18 @@ namespace CanvasApp.Client
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             CanvasClient.Instance.OnMessageReceived -= OnServerMessage;
+
+            // GDI+ objects must be explicitly disposed — the GC will eventually finalize them
+            // but the underlying native handles + bitmap pixel buffer (up to ~8 MB for a 4000²
+            // canvas) stick around until the next gen-2 collection. Multiple lobby<->canvas
+            // round-trips without disposal pile up several copies in memory.
+            try { _graphics?.Dispose(); } catch { }
+            try { _bitmap?.Dispose(); }   catch { }
+            try { _bgImage?.Dispose(); }  catch { }
+            _graphics = null;
+            _bitmap = null;
+            _bgImage = null;
+
             base.OnFormClosed(e);
         }
         // ── Undo & Redo Logic ───────────────────────────────────────────

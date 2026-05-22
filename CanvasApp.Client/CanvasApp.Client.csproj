@@ -8,10 +8,11 @@
     <OutputType>WinExe</OutputType>
     <RootNamespace>CanvasApp.Client</RootNamespace>
     <AssemblyName>CanvasApp.Client</AssemblyName>
-    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
     <Deterministic>true</Deterministic>
+    <TargetFrameworkProfile />
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <PlatformTarget>AnyCPU</PlatformTarget>
@@ -34,7 +35,16 @@
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="Guna.UI2, Version=2.0.4.7, Culture=neutral, PublicKeyToken=8b9d14aa5142e261, processorArchitecture=MSIL">
-      <HintPath>..\packages\Guna.UI2.WinForms.2.0.4.7\lib\net472\Guna.UI2.dll</HintPath>
+      <HintPath>..\packages\Guna.UI2.WinForms.2.0.4.7\lib\net48\Guna.UI2.dll</HintPath>
+    </Reference>
+    <Reference Include="MetroFramework, Version=1.4.0.0, Culture=neutral, PublicKeyToken=5f91a84759bf584a, processorArchitecture=MSIL">
+      <HintPath>..\packages\MetroModernUI.1.4.0.0\lib\net\MetroFramework.dll</HintPath>
+    </Reference>
+    <Reference Include="MetroFramework.Design, Version=1.4.0.0, Culture=neutral, PublicKeyToken=5f91a84759bf584a, processorArchitecture=MSIL">
+      <HintPath>..\packages\MetroModernUI.1.4.0.0\lib\net\MetroFramework.Design.dll</HintPath>
+    </Reference>
+    <Reference Include="MetroFramework.Fonts, Version=1.4.0.0, Culture=neutral, PublicKeyToken=5f91a84759bf584a, processorArchitecture=MSIL">
+      <HintPath>..\packages\MetroModernUI.1.4.0.0\lib\net\MetroFramework.Fonts.dll</HintPath>
     </Reference>
     <Reference Include="Newtonsoft.Json, Version=13.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
       <HintPath>..\packages\Newtonsoft.Json.13.0.4\lib\net45\Newtonsoft.Json.dll</HintPath>
@@ -55,23 +65,38 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Controls\GradientPanel.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="Controls\loginTextbox.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Include="Controls\loginTextbox.Designer.cs">
+      <DependentUpon>loginTextbox.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Controls\RoomCard.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Include="Controls\RoomCard.Designer.cs">
+      <DependentUpon>RoomCard.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Controls\UserListItem.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Include="Controls\UserListItem.Designer.cs">
+      <DependentUpon>UserListItem.cs</DependentUpon>
+    </Compile>
     <Compile Include="Forms\CanvasForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Forms\CanvasForm.Designer.cs">
       <DependentUpon>CanvasForm.cs</DependentUpon>
     </Compile>
-    <Compile Include="Forms\CreateRoomDialog.cs">
-      <SubType>Form</SubType>
+    <Compile Include="Forms\CreateRoom.cs">
+      <SubType>UserControl</SubType>
     </Compile>
-    <Compile Include="Forms\CreateRoomDialog.Designer.cs">
-      <DependentUpon>CreateRoomDialog.cs</DependentUpon>
-    </Compile>
-    <Compile Include="Forms\ExportDialog.cs">
-      <SubType>Form</SubType>
-    </Compile>
-    <Compile Include="Forms\ExportDialog.Designer.cs">
-      <DependentUpon>ExportDialog.cs</DependentUpon>
+    <Compile Include="Forms\CreateRoom.Designer.cs">
+      <DependentUpon>CreateRoom.cs</DependentUpon>
     </Compile>
     <Compile Include="Forms\LobbyForm.cs">
       <SubType>Form</SubType>
@@ -85,8 +110,69 @@
     <Compile Include="Forms\LoginForm.Designer.cs">
       <DependentUpon>LoginForm.cs</DependentUpon>
     </Compile>
+    <Compile Include="Forms\OtpVerifyForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Forms\OtpVerifyForm.Designer.cs">
+      <DependentUpon>OtpVerifyForm.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Forms\ForgotPasswordForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Forms\ForgotPasswordForm.Designer.cs">
+      <DependentUpon>ForgotPasswordForm.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Forms\RegisterForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Forms\RegisterForm.Designer.cs">
+      <DependentUpon>RegisterForm.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Forms\RequirePassword.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Include="Forms\RequirePassword.Designer.cs">
+      <DependentUpon>RequirePassword.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Network\AuthClient.cs" />
+    <Compile Include="Network\CanvasClient.cs" />
+    <Compile Include="Network\LobbyClient.cs" />
+    <Compile Include="Network\Session.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <EmbeddedResource Include="Controls\loginTextbox.resx">
+      <DependentUpon>loginTextbox.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Controls\RoomCard.resx">
+      <DependentUpon>RoomCard.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Controls\UserListItem.resx">
+      <DependentUpon>UserListItem.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Forms\CanvasForm.resx">
+      <DependentUpon>CanvasForm.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Forms\CreateRoom.resx">
+      <DependentUpon>CreateRoom.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Forms\LobbyForm.resx">
+      <DependentUpon>LobbyForm.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Forms\LoginForm.resx">
+      <DependentUpon>LoginForm.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Forms\OtpVerifyForm.resx">
+      <DependentUpon>OtpVerifyForm.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Forms\ForgotPasswordForm.resx">
+      <DependentUpon>ForgotPasswordForm.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Forms\RegisterForm.resx">
+      <DependentUpon>RegisterForm.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Forms\RequirePassword.resx">
+      <DependentUpon>RequirePassword.cs</DependentUpon>
+    </EmbeddedResource>
     <EmbeddedResource Include="Properties\Resources.resx">
       <Generator>ResXFileCodeGenerator</Generator>
       <LastGenOutput>Resources.Designer.cs</LastGenOutput>
@@ -95,6 +181,7 @@
     <Compile Include="Properties\Resources.Designer.cs">
       <AutoGen>True</AutoGen>
       <DependentUpon>Resources.resx</DependentUpon>
+      <DesignTime>True</DesignTime>
     </Compile>
     <None Include="packages.config" />
     <None Include="Properties\Settings.settings">
@@ -117,10 +204,40 @@
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>
-    <Folder Include="Controls\" />
-    <Folder Include="Drawing\" />
-    <Folder Include="Network\" />
+    <Compile Include="Drawing\Shapes\ShapeType.cs" />
+    <Compile Include="Drawing\Shapes\RecognizedShape.cs" />
+    <Compile Include="Drawing\Recognition\RecognitionConfig.cs" />
+    <Compile Include="Drawing\Recognition\RecognitionResult.cs" />
+    <Compile Include="Drawing\Recognition\StrokeAnalysis.cs" />
+    <Compile Include="Drawing\Recognition\IShapeDetector.cs" />
+    <Compile Include="Drawing\Recognition\LineDetector.cs" />
+    <Compile Include="Drawing\Recognition\RectangleDetector.cs" />
+    <Compile Include="Drawing\Recognition\CircleDetector.cs" />
+    <Compile Include="Drawing\Recognition\EllipseDetector.cs" />
+    <Compile Include="Drawing\Recognition\ShapeRecognizer.cs" />
+    <Compile Include="Drawing\Rendering\ShapeRenderer.cs" />
+    <Compile Include="Drawing\StrokeCollector.cs" />
+    <Compile Include="Drawing\SuggestionOverlay.cs" />
+    <Compile Include="Drawing\ShapeSuggestionController.cs" />
     <Folder Include="Resources\Icons\" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Purplever.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Screenshot 2026-04-21 011733.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Screenshot 2026-04-21 021638.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\Image1.bmp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\whitever.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\copy.png" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

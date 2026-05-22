@@ -9,4 +9,5 @@ namespace CanvasApp.Common.Models
     internal class MessageType
     {
     }
+
 }

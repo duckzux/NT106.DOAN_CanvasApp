@@ -29,8 +29,7 @@ namespace CanvasApp.Client
         private int _thickness = 3;
         private string _currentTool = "pen";
         private DrawAction _currentStroke;
-        private Image _bgImage = null;
-        
+
         private float _zoom = 1.0f;
         private System.Drawing.PointF _panOffset = new System.Drawing.PointF(0, 0);
         private bool _isPanning = false;
@@ -73,6 +72,20 @@ namespace CanvasApp.Client
             // Scale copy icon (64×64) xuống vừa button 20×20
             if (btnCopyCode.Image != null)
                 btnCopyCode.Image = new Bitmap(btnCopyCode.Image, 15, 15);
+
+            // Load btnImportBg icon từ embedded resource (resx ResXFileRef không reliable)
+            using (var stream = typeof(CanvasForm).Assembly
+                .GetManifestResourceStream("CanvasApp.Client.Resources.upload.png"))
+            {
+                if (stream != null)
+                    btnImportBg.Image = Image.FromStream(stream);
+            }
+            btnImportBg.DisplayStyle = ToolStripItemDisplayStyle.Image;
+            btnImportBg.ImageTransparentColor = Color.Empty;
+            btnImportBg.ToolTipText = "Chèn ảnh vào canvas";
+
+            // Wire the "select" toolbar button (used to drag/resize imported images).
+            InitImageSelectButton();
 
             //Chống nhấp nháy màn hình khi vẽ
             typeof(Panel).InvokeMember("DoubleBuffered",
@@ -126,22 +139,8 @@ namespace CanvasApp.Client
                 await CanvasClient.Instance.SendDrawAsync(MessageTypeFor(action), action);
             };
 
-            // Import - Export Background
-
-            btnImportBg.Click += (s, e) =>
-            {
-                using (OpenFileDialog openFileDialog = new OpenFileDialog())
-                {
-                    openFileDialog.Filter = "Image Files(*.BMP;*.JPG;*.JPEG;*.PNG)|*.BMP;*.JPG;*.JPEG;*.PNG";
-                    openFileDialog.Title = "Chọn ảnh nền cho Canvas";
-
-                    if (openFileDialog.ShowDialog() == DialogResult.OK)
-                    {
-                        _bgImage = Image.FromFile(openFileDialog.FileName);
-                        canvasPanel.Invalidate();
-                    }
-                }
-            };
+            // Import image — places as a movable/resizable overlay layer (see CanvasForm.Images.cs).
+            btnImportBg.Click += async (s, e) => await ImportImageFromFile();
             btnExport.Click += (s, e) =>
             {
                 using (SaveFileDialog saveFileDialog = new SaveFileDialog())
@@ -165,16 +164,19 @@ namespace CanvasApp.Client
                         {
                             g.Clear(Color.White);
                             DrawBackgroundTemplateForExport(g, exportW, exportH, originX, originY);
-                            if (_bgImage != null)
-                            {
-                                g.DrawImage(_bgImage, -originX, -originY, _bgImage.Width, _bgImage.Height);
-                            }
                             if (_bitmap != null)
                             {
                                 // bitmap pixel (bx,by) = canvas (bx-_canvasOffsetX, by-_canvasOffsetY)
                                 // export pixel (0,0) = canvas (originX, originY)
                                 // → vẽ bitmap tại export (-_canvasOffsetX - originX, -_canvasOffsetY - originY)
                                 g.DrawImage(_bitmap, -_canvasOffsetX - originX, -_canvasOffsetY - originY);
+                            }
+                            // Imported images live on top of the rasterized strokes; export them in
+                            // z-order at their current canvas position.
+                            foreach (var id in _imageOrder)
+                            {
+                                if (!_imagesById.TryGetValue(id, out var ci) || ci.Image == null) continue;
+                                g.DrawImage(ci.Image, ci.X - originX, ci.Y - originY, ci.Width, ci.Height);
                             }
                         }
 
@@ -440,16 +442,13 @@ namespace CanvasApp.Client
 
             DrawBackgroundTemplate(e.Graphics);
 
-            // Draw Background Image (từ nhánh feature/export-image)
-            if (_bgImage != null)
-            {
-                e.Graphics.DrawImage(_bgImage, 0, 0, _bgImage.Width, _bgImage.Height);
-            }
-
             if (_bitmap != null)
             {
                 e.Graphics.DrawImage(_bitmap, -_canvasOffsetX, -_canvasOffsetY);
             }
+
+            // Imported images + selection handles overlay (CanvasForm.Images.cs).
+            RenderImagesAndHandles(e.Graphics);
 
             // Draw active shape (từ nhánh dev)
             if (_isDrawing && _currentStroke != null && IsShapeTool(_currentTool))
@@ -693,6 +692,9 @@ namespace CanvasApp.Client
             if (_textEditActive)
                 CommitTextEdit();
 
+            // Image select/move/resize takes precedence over drawing tools when active.
+            if (TrySelectToolMouseDown(e)) return;
+
             if (_currentTool == "text")
             {
                 var clickPt = ScreenToCanvas(e.X, e.Y);
@@ -800,6 +802,9 @@ namespace CanvasApp.Client
 
             lblCoordinates.Text = $"X: {e.X}, Y: {e.Y}";
 
+            // Image drag/resize update (when select tool is mid-gesture).
+            if (TrySelectToolMouseMove(e)) return;
+
             if (_suggest.IsDrawing)
             {
                 var smartPt = ScreenToCanvas(e.X, e.Y);
@@ -853,6 +858,9 @@ namespace CanvasApp.Client
                 canvasPanel.Invalidate();
                 return;
             }
+
+            // Commit image drag/resize and broadcast TRANSFORM to peers.
+            if (await TrySelectToolMouseUpAsync(e)) return;
 
             if (!_isDrawing) return;
             _isDrawing = false;
@@ -914,6 +922,12 @@ namespace CanvasApp.Client
         private void DrawActionLocal(DrawAction action)
         {
             if (action == null || action.Points == null || _graphics == null) return;
+            if (action.Type == "image")
+            {
+                // Images are overlays — register/update in _imagesById, do NOT rasterize into the bitmap.
+                ApplyImageAction(action);
+                return;
+            }
             if (action.Type.Contains("rectangle") || action.Type.Contains("circle") || action.Type.Contains("line") || action.Type.Contains("arrow") || action.Type.Contains("triangle"))
             {
                 if (action.Points.Count < 2) return;
@@ -1097,6 +1111,35 @@ namespace CanvasApp.Client
                         _history.Add(action);
                         // A remote action invalidates my pending redo branch (Figma semantics).
                         _redoStack.Clear();
+                        canvasPanel.Invalidate();
+                        break;
+                    }
+
+                    case MessageType.DRAW_IMAGE:
+                    {
+                        var action = msg.GetData<DrawAction>();
+                        if (action == null) break;
+                        ApplyImageAction(action);
+                        if (string.IsNullOrEmpty(action.ActionId))
+                            action.ActionId = "srv-" + action.SeqNo;
+                        _history.Add(action);
+                        _redoStack.Clear();
+                        canvasPanel.Invalidate();
+                        break;
+                    }
+
+                    case MessageType.DRAW_IMAGE_TRANSFORM:
+                    {
+                        var action = msg.GetData<DrawAction>();
+                        if (action == null || string.IsNullOrEmpty(action.ActionId)) break;
+                        ApplyImageAction(action);
+                        // Keep the CREATE entry's bounds in sync so RedrawCanvas reproduces latest state.
+                        var createAction = _history.FirstOrDefault(a => a?.ActionId == action.ActionId && a.Type == "image");
+                        if (createAction != null && action.Points != null && action.Points.Count >= 2)
+                        {
+                            createAction.Points[0] = action.Points[0];
+                            createAction.Points[1] = action.Points[1];
+                        }
                         canvasPanel.Invalidate();
                         break;
                     }
@@ -1383,7 +1426,9 @@ namespace CanvasApp.Client
         // ── Undo & Redo Logic ───────────────────────────────────────────
         private void RedrawCanvas()
         {
-            _graphics.Clear(Color.Transparent); // Đổi thành Transparent để không đè lên Background Image
+            _graphics.Clear(Color.Transparent);
+            // Image overlays live outside the bitmap; replay history rebuilds them from CREATE actions.
+            ResetImagesForRedraw();
             foreach (var action in _history)
                 DrawActionLocal(action);
             canvasPanel.Invalidate();
@@ -1397,6 +1442,7 @@ namespace CanvasApp.Client
         {
             if (action == null || string.IsNullOrEmpty(action.Type)) return MessageType.DRAW_END;
             if (action.Type == "fill") return MessageType.DRAW_FILL;
+            if (action.Type == "image") return MessageType.DRAW_IMAGE;
             if (action.Type.StartsWith("text:")) return MessageType.DRAW_SHAPE;
             if (action.Type.Contains("rectangle") || action.Type.Contains("circle")
                 || action.Type.Contains("line") || action.Type.Contains("arrow")
@@ -1448,6 +1494,13 @@ namespace CanvasApp.Client
                     e.SuppressKeyPress = true;
                     return;
                 }
+            }
+
+            if (e.KeyCode == Keys.Delete && !string.IsNullOrEmpty(_selectedImageId))
+            {
+                _ = DeleteSelectedImageAsync();
+                e.SuppressKeyPress = true;
+                return;
             }
 
             if (e.Control && e.KeyCode == Keys.Z)

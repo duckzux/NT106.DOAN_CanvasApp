@@ -92,6 +92,9 @@
     <Compile Include="Forms\CanvasForm.Designer.cs">
       <DependentUpon>CanvasForm.cs</DependentUpon>
     </Compile>
+    <Compile Include="Forms\CanvasForm.Images.cs">
+      <DependentUpon>CanvasForm.cs</DependentUpon>
+    </Compile>
     <Compile Include="Forms\CreateRoom.cs">
       <SubType>UserControl</SubType>
     </Compile>
@@ -219,7 +222,6 @@
     <Compile Include="Drawing\StrokeCollector.cs" />
     <Compile Include="Drawing\SuggestionOverlay.cs" />
     <Compile Include="Drawing\ShapeSuggestionController.cs" />
-    <Folder Include="Resources\Icons\" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Resources\Purplever.png" />
@@ -238,6 +240,12 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="Resources\copy.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\upload.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="Resources\Icons\" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

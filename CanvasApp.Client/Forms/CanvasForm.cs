@@ -451,8 +451,18 @@ namespace CanvasApp.Client
 
         private void CanvasPanel_Paint(object sender, PaintEventArgs e)
         {
-            e.Graphics.TranslateTransform(_panOffset.X, _panOffset.Y);
-            e.Graphics.ScaleTransform(_zoom, _zoom);
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            System.Drawing.Drawing2D.GraphicsContainer container = g.BeginContainer();
+
+            g.TranslateTransform(_panOffset.X, _panOffset.Y);
+            g.ScaleTransform(_zoom, _zoom);
+
+            if (_bitmap != null)
+            {
+                g.DrawImage(_bitmap, 0, 0);
+            }
 
             DrawBackgroundTemplate(e.Graphics);
 
@@ -470,8 +480,10 @@ namespace CanvasApp.Client
             // Draw active shape (từ nhánh dev)
             if (_isDrawing && _currentStroke != null && IsShapeTool(_currentTool))
             {
-                DrawShape(e.Graphics, _currentStroke.Type, _lastPoint, _currentPoint, _currentStroke.Color, _currentStroke.Thickness);
+                DrawShape(g, _currentStroke.Type, _lastPoint, _currentPoint, _currentStroke.Color, _currentStroke.Thickness);
             }
+
+            g.EndContainer(container);
 
             // Inline text editing preview — no background, no border
             if (_textEditActive)
@@ -701,8 +713,10 @@ namespace CanvasApp.Client
             {
                 _isPanning = true;
                 _lastMousePos = e.Location;
+                canvasPanel.Cursor = Cursors.Hand;
                 return;
             }
+            if (_isPanning) return;
 
             if (e.Button != MouseButtons.Left) return;
 
@@ -859,6 +873,7 @@ namespace CanvasApp.Client
             if (e.Button == MouseButtons.Middle)
             {
                 _isPanning = false;
+                canvasPanel.Cursor = Cursors.Default;
                 return;
             }
 

@@ -13,10 +13,10 @@ namespace CanvasApp.AuthServer
         private readonly TcpListener _listener;
         private readonly AuthHandler _handler;
 
-        public AuthServer(int port, UserStore store)
+        public AuthServer(int port, UserStore store, OtpStore otpStore)
         {
             _listener = new TcpListener(IPAddress.Any, port);
-            _handler = new AuthHandler(store);
+            _handler = new AuthHandler(store, otpStore);
         }
 
         public async Task StartAsync()

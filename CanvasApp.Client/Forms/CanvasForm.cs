@@ -400,6 +400,15 @@ namespace CanvasApp.Client
             canvasPanel.Invalidate();
             RenderUserList(_initialMembers);
             AppendSystemMessage($"Bạn đã vào phòng '{joinRes.Room.Name}'.");
+
+            // Chat history is now embedded in the join result (server fetches it before
+            // adding the joiner to the room's broadcast list, so anything we get via live
+            // CHAT_MESSAGE after this point is strictly newer and won't duplicate).
+            if (joinRes.ChatHistory != null)
+            {
+                foreach (var m in joinRes.ChatHistory)
+                    AppendChatMessage(m.Username, m.Text);
+            }
         }
 
         // ── Canvas init ─────────────────────────────────────────────────

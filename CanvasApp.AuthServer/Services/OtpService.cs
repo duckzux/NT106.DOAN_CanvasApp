@@ -14,6 +14,10 @@ namespace CanvasApp.AuthServer.Services
     public class OtpService
     {
         private const int MaxAttempts = 5;
+        // Rate limit: at most 1 OTP per email per minute, and 5 per hour. Tuned for demo —
+        // forgot-password + register flows should never legitimately exceed these in normal use.
+        private const int RateLimitPerMinute = 1;
+        private const int RateLimitPerHour = 5;
 
         private readonly OtpStore _store;
         private readonly SmtpEmailSender _mailer;
@@ -25,6 +29,25 @@ namespace CanvasApp.AuthServer.Services
             _mailer = mailer;
             _expirationMinutes = int.TryParse(ConfigurationManager.AppSettings["OtpExpirationMinutes"], out var m) && m > 0
                 ? m : 5;
+        }
+
+        // Returns null on success, or a user-facing error string when the email has hit a limit.
+        // Centralised here so both SendOtp and SendForgotPasswordOtp share identical thresholds.
+        private string CheckRateLimit(string email)
+        {
+            try
+            {
+                if (_store.CountRecentByEmail(email, DateTime.UtcNow.AddMinutes(-1)) >= RateLimitPerMinute)
+                    return "Vui lòng đợi 1 phút trước khi yêu cầu mã mới";
+                if (_store.CountRecentByEmail(email, DateTime.UtcNow.AddHours(-1)) >= RateLimitPerHour)
+                    return "Đã yêu cầu quá nhiều mã trong 1 giờ — thử lại sau";
+            }
+            catch (Exception ex)
+            {
+                // DB hiccup shouldn't block legitimate sends; log and continue.
+                Console.WriteLine($"[OtpService] rate-limit query failed: {ex.Message}");
+            }
+            return null;
         }
 
         /// <summary>
@@ -48,6 +71,11 @@ namespace CanvasApp.AuthServer.Services
             if (user == null)
                 return new Message(MessageType.AUTH_FORGOT_SEND_OTP_RESULT,
                     new ForgotPasswordSendOtpResult { Success = false, Message = "Không tìm thấy tài khoản với email này" });
+
+            var rateError = CheckRateLimit(email);
+            if (rateError != null)
+                return new Message(MessageType.AUTH_FORGOT_SEND_OTP_RESULT,
+                    new ForgotPasswordSendOtpResult { Success = false, Message = rateError });
 
             var code = GenerateSixDigitCode();
             var token = Guid.NewGuid().ToString();
@@ -120,6 +148,11 @@ namespace CanvasApp.AuthServer.Services
             if (_store.UsernameExists(username))
                 return new Message(MessageType.AUTH_SEND_OTP_RESULT,
                     new SendOtpResult { Success = false, Message = "Username đã tồn tại" });
+
+            var rateError = CheckRateLimit(email);
+            if (rateError != null)
+                return new Message(MessageType.AUTH_SEND_OTP_RESULT,
+                    new SendOtpResult { Success = false, Message = rateError });
 
             var code = GenerateSixDigitCode();
             var token = Guid.NewGuid().ToString();

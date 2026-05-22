@@ -65,6 +65,13 @@ namespace CanvasApp.Common
         public const string ROOM_JOIN_RESULT = "ROOM_JOIN_RESULT";
         public const string ROOM_LEAVE = "ROOM_LEAVE";
         public const string ROOM_UPDATE = "ROOM_UPDATE";
+        // Owner-only room management from the lobby. Both go through the LB to any Canvas
+        // server, which updates DB + in-memory state and broadcasts ROOM_LIST_RESULT to all
+        // lobby clients (and notifies peers via PEER_RELAY if mesh is configured).
+        public const string ROOM_DELETE = "ROOM_DELETE";
+        public const string ROOM_DELETE_RESULT = "ROOM_DELETE_RESULT";
+        public const string ROOM_UPDATE_PASSWORD = "ROOM_UPDATE_PASSWORD";
+        public const string ROOM_UPDATE_PASSWORD_RESULT = "ROOM_UPDATE_PASSWORD_RESULT";
         // Routing-only "pre-join" sent through the LoadBalancer. Server verifies the room
         // exists + password matches and returns ServerHost/ServerPort. Crucially it does NOT
         // register the user into the room and does NOT broadcast — so the LB-routed socket
@@ -115,6 +122,14 @@ namespace CanvasApp.Common
         // `_rooms` / invite-code maps. Without this, rooms created at runtime are invisible
         // to peers until restart (which reloads everything from DB via LoadActiveRooms).
         public const string PEER_ROOM_CREATE = "PEER_ROOM_CREATE";
+        // Sent when the owner deletes a room from the lobby so every peer drops the room
+        // from its in-memory state and refreshes its lobby clients. Without this, peers
+        // keep showing the deleted room in their lobby until they restart.
+        public const string PEER_ROOM_DELETE = "PEER_ROOM_DELETE";
+        // Sent when the owner changes the room password. Peers update in-memory
+        // Room.PasswordHash + HasPassword so subsequent Resolve/Join verifies against the
+        // new password regardless of which Canvas server received the change.
+        public const string PEER_ROOM_PASSWORD_UPDATED = "PEER_ROOM_PASSWORD_UPDATED";
         // Heartbeat from one peer to another to detect half-open connections.
         // Receiver responds with PEER_PONG on the same connection.
         public const string PEER_PING = "PEER_PING";

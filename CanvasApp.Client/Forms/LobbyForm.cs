@@ -17,6 +17,11 @@ namespace CanvasApp.Client
     {
         private CreateRoom createRoom;
         private RequirePassword requirePassword;
+        // Lobby clients use short-lived TCP per request — there's no persistent socket the
+        // server can push room-list updates over. Poll every few seconds so deletions / password
+        // changes / new rooms made by other users surface without the user manually refreshing.
+        private Timer _autoRefreshTimer;
+        private bool _refreshing;
 
         public LobbyForm()
         {
@@ -30,6 +35,7 @@ namespace CanvasApp.Client
             {
                 AddJoinByCodeButton();
                 await RefreshRoomListAsync();
+                StartAutoRefresh();
             };
 
             this.Shown += async (s, e) =>
@@ -37,6 +43,30 @@ namespace CanvasApp.Client
                 // After returning from CanvasForm, lobby is shown again — refresh the list.
                 if (this.Visible) await RefreshRoomListAsync();
             };
+
+            this.FormClosed += (s, e) => StopAutoRefresh();
+        }
+
+        private void StartAutoRefresh()
+        {
+            if (_autoRefreshTimer != null) return;
+            _autoRefreshTimer = new Timer { Interval = 3000 };
+            _autoRefreshTimer.Tick += async (s, e) =>
+            {
+                // Skip overlapping refreshes — a slow LB shouldn't stack up requests.
+                if (_refreshing || !this.Visible) return;
+                _refreshing = true;
+                try { await RefreshRoomListAsync(silent: true); }
+                finally { _refreshing = false; }
+            };
+            _autoRefreshTimer.Start();
+        }
+
+        private void StopAutoRefresh()
+        {
+            _autoRefreshTimer?.Stop();
+            _autoRefreshTimer?.Dispose();
+            _autoRefreshTimer = null;
         }
 
         private void UpdateGreeting()
@@ -107,13 +137,18 @@ namespace CanvasApp.Client
 
         // ── LB queries (each one fresh short-lived TCP) ─────────────────
 
-        private async Task RefreshRoomListAsync()
+        private async Task RefreshRoomListAsync(bool silent = false)
         {
             var list = await LobbyClient.GetRoomListAsync();
             if (list == null)
             {
-                MessageBox.Show("Không kết nối được Load Balancer.", "Lỗi mạng",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                // Don't pop a dialog on background polls — a transient LB hiccup would
+                // otherwise spam the user every 3 seconds.
+                if (!silent)
+                {
+                    MessageBox.Show("Không kết nối được Load Balancer.", "Lỗi mạng",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
                 return;
             }
             RenderRoomList(list);
@@ -134,7 +169,11 @@ namespace CanvasApp.Client
                 RoomName = room.Name,
                 Password = room.HasPassword ? "***" : null,
                 MaxPlayers = room.MaxUsers,
-                CurrentPlayers = room.CurrentUsers
+                CurrentPlayers = room.CurrentUsers,
+                // Setting OwnerId last triggers UpdateOwnerControlsVisibility() inside RoomCard,
+                // which shows/hides the Delete + Change-password buttons depending on whether
+                // the current user is this room's owner.
+                OwnerId = room.OwnerId
             };
 
             card.OnJoinClick += (s, e) =>
@@ -146,7 +185,77 @@ namespace CanvasApp.Client
                     _ = JoinRoomAsync(rc.RoomId, "");
             };
 
+            card.OnDeleteClick += async (s, e) =>
+            {
+                var rc = s as RoomCard;
+                var confirm = MessageBox.Show(
+                    $"Xóa phòng \"{rc.RoomName}\"? Hành động này không thể hoàn tác.",
+                    "Xác nhận xóa phòng",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (confirm != DialogResult.Yes) return;
+
+                var result = await LobbyClient.DeleteRoomAsync(rc.RoomId);
+                if (result == null || !result.Success)
+                {
+                    MessageBox.Show(result?.Message ?? "Không kết nối được server.",
+                        "Lỗi xóa phòng", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                await RefreshRoomListAsync();
+            };
+
+            card.OnChangePasswordClick += async (s, e) =>
+            {
+                var rc = s as RoomCard;
+                var newPwd = PromptNewPassword(rc.RoomName);
+                if (newPwd == null) return; // user cancelled
+
+                var result = await LobbyClient.UpdateRoomPasswordAsync(rc.RoomId, newPwd);
+                if (result == null || !result.Success)
+                {
+                    MessageBox.Show(result?.Message ?? "Không kết nối được server.",
+                        "Lỗi đổi mật khẩu", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                MessageBox.Show(result.Message, "Đổi mật khẩu",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                await RefreshRoomListAsync();
+            };
+
             flowLayoutPanel1.Controls.Add(card);
+        }
+
+        // Returns null if the user cancelled, "" to clear the password, or the new password.
+        private string PromptNewPassword(string roomName)
+        {
+            using (var dlg = new Form
+            {
+                Text = $"Đổi mật khẩu — {roomName}",
+                Size = new Size(360, 200),
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MaximizeBox = false,
+                MinimizeBox = false
+            })
+            {
+                var lbl = new Label { Text = "Mật khẩu mới:", Location = new Point(20, 25), AutoSize = true };
+                var txt = new TextBox { Location = new Point(130, 22), Size = new Size(190, 25), PasswordChar = '●' };
+                var hint = new Label
+                {
+                    Text = "(bỏ trống để gỡ mật khẩu phòng)",
+                    Location = new Point(130, 50),
+                    AutoSize = true,
+                    ForeColor = Color.Gray,
+                    Font = new Font(Font.FontFamily, 7.5f)
+                };
+                var btnOk = new Button { Text = "Lưu", Location = new Point(120, 90), Size = new Size(95, 32), DialogResult = DialogResult.OK };
+                var btnCancel = new Button { Text = "Hủy", Location = new Point(225, 90), Size = new Size(95, 32), DialogResult = DialogResult.Cancel };
+                dlg.Controls.AddRange(new Control[] { lbl, txt, hint, btnOk, btnCancel });
+                dlg.AcceptButton = btnOk;
+                dlg.CancelButton = btnCancel;
+
+                return dlg.ShowDialog(this) == DialogResult.OK ? txt.Text : null;
+            }
         }
 
         // ── Join logic ──────────────────────────────────────────────────

@@ -182,6 +182,21 @@ namespace CanvasApp.LoadBalancer
             if (inserted) server.IncrementRoomCount();
         }
 
+        /// <summary>
+        /// Drop a room from the routing table after the owner deletes it. Decrements
+        /// RoomCount on the bound server so the least-loaded picker doesn't develop a
+        /// permanent skew toward servers that have hosted (now-deleted) rooms in the past.
+        /// </summary>
+        private void UnregisterRoom(string roomId)
+        {
+            if (string.IsNullOrEmpty(roomId)) return;
+            if (_roomRouting.TryRemove(roomId, out var bound))
+            {
+                bound.DecrementRoomCount();
+                Console.WriteLine($"[ROUTE] room {roomId} unbound from {bound.Endpoint}");
+            }
+        }
+
         // ── Per-connection proxy ──────────────────────────────────────────
 
         private async Task HandleClientAsync(TcpClient client)
@@ -246,6 +261,48 @@ namespace CanvasApp.LoadBalancer
                     {
                         target = RouteForRoom(req.RoomId);
                         boundRoomId = req.RoomId;
+                    }
+                    else
+                    {
+                        target = PickCanvasLeastLoaded();
+                    }
+                    if (target == null)
+                    {
+                        Console.WriteLine($"[LB] {clientEp} rejected — no healthy Canvas backend");
+                        return;
+                    }
+                }
+                else if (type == MessageType.ROOM_DELETE)
+                {
+                    // Sticky route the delete to the server that hosts the room so the
+                    // ownership check + memory-state cleanup happens locally. We capture
+                    // the roomId here so the response-sniffer below can unregister the
+                    // routing entry once the server confirms success.
+                    var delReq = SafeGetData<DeleteRoomRequest>(msg);
+                    if (delReq != null && !string.IsNullOrEmpty(delReq.RoomId))
+                    {
+                        target = RouteForRoom(delReq.RoomId);
+                        boundRoomId = delReq.RoomId;
+                    }
+                    else
+                    {
+                        target = PickCanvasLeastLoaded();
+                    }
+                    if (target == null)
+                    {
+                        Console.WriteLine($"[LB] {clientEp} rejected — no healthy Canvas backend");
+                        return;
+                    }
+                }
+                else if (type == MessageType.ROOM_UPDATE_PASSWORD)
+                {
+                    // Same sticky routing as ROOM_DELETE so the password update lands on the
+                    // server holding the room; the new hash then peer-syncs to the others.
+                    var pwdReq = SafeGetData<UpdateRoomPasswordRequest>(msg);
+                    if (pwdReq != null && !string.IsNullOrEmpty(pwdReq.RoomId))
+                    {
+                        target = RouteForRoom(pwdReq.RoomId);
+                        boundRoomId = pwdReq.RoomId;
                     }
                     else
                     {
@@ -354,6 +411,36 @@ namespace CanvasApp.LoadBalancer
                         }
                     }
                     catch (TimeoutException) { Console.WriteLine($"[LB] {clientEp} ROOM_CREATE_RESULT timeout"); }
+                    catch (Exception ex) { Console.WriteLine($"[LB] {clientEp} sniff error: {ex.Message}"); }
+                }
+                else if (type == MessageType.ROOM_DELETE && !string.IsNullOrEmpty(boundRoomId))
+                {
+                    // Peek the response so we only drop the routing entry on a successful
+                    // delete. A failed delete (e.g. non-owner or room not empty) must keep
+                    // the room's mapping intact.
+                    try
+                    {
+                        var responseLine = await ReadOneLineAsync(backendStream, _peekMaxBytes, 10_000);
+                        if (!string.IsNullOrEmpty(responseLine))
+                        {
+                            try
+                            {
+                                var respMsg = Message.FromJson(responseLine);
+                                if (respMsg?.Type == MessageType.ROOM_DELETE_RESULT)
+                                {
+                                    var res = SafeGetData<DeleteRoomResult>(respMsg);
+                                    if (res != null && res.Success)
+                                        UnregisterRoom(boundRoomId);
+                                }
+                            }
+                            catch { /* unparseable — just forward */ }
+
+                            var respBytes = Encoding.UTF8.GetBytes(responseLine + "\n");
+                            await clientStream.WriteAsync(respBytes, 0, respBytes.Length);
+                            await clientStream.FlushAsync();
+                        }
+                    }
+                    catch (TimeoutException) { Console.WriteLine($"[LB] {clientEp} ROOM_DELETE_RESULT timeout"); }
                     catch (Exception ex) { Console.WriteLine($"[LB] {clientEp} sniff error: {ex.Message}"); }
                 }
 

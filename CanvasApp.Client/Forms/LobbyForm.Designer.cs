@@ -88,7 +88,7 @@ namespace CanvasApp.Client
             // 
             this.lblGreeting.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
             this.lblGreeting.AutoSize = true;
-            this.lblGreeting.BackColor = System.Drawing.Color.MediumPurple;
+            this.lblGreeting.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
             this.lblGreeting.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
             this.lblGreeting.FlatStyle = System.Windows.Forms.FlatStyle.Popup;
             this.lblGreeting.Font = new System.Drawing.Font("Montserrat ExtraBold", 10.2F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));

@@ -20,14 +20,21 @@ namespace CanvasApp.Server
         public TcpClient Tcp { get; set; }
         public StreamWriter Writer { get; set; }
 
+        // StreamWriter.WriteLineAsync is NOT thread-safe — concurrent draw / chat / room-update
+        // writes can interleave bytes mid-line and the client's StreamReader sees malformed JSON
+        // (e.g. half of one message glued onto the start of the next). Serialise sends per client.
+        private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
+
         public async Task SendAsync(Message msg)
         {
+            await _sendLock.WaitAsync();
             try
             {
                 if (Writer != null && Tcp.Connected)
                     await Writer.WriteLineAsync(msg.ToJson());
             }
             catch { /* ignore broken pipe */ }
+            finally { _sendLock.Release(); }
         }
     }
 
@@ -78,9 +85,20 @@ namespace CanvasApp.Server
         private readonly PersistenceQueue _queue;
         private readonly CanvasSnapshotDAO _snapDao;
         private readonly DrawActionDAO _drawActionDao;
+        // ChatMessageDAO is wired in via SetChatDao() rather than the constructor so the existing
+        // 5-arg constructor signature stays compatible. Used by Join() to fetch chat history
+        // BEFORE the joiner is added to _roomClients, eliminating the history-vs-live duplicate.
+        private ChatMessageDAO _chatDao;
+        public void SetChatDao(ChatMessageDAO chatDao) => _chatDao = chatDao;
 
         private static readonly Random _rng = new Random();
         private const string InviteChars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+        // Set by Program.cs after construction. Used by ApplyFromPeerAsync to ignore
+        // PEER_RELAY envelopes that originated on this same server (happens when the peer
+        // mesh is misconfigured so a server ends up connected to itself — without this guard
+        // every chat / draw / room event would be applied twice).
+        public string SelfServerId { get; set; }
 
         public RoomManager(
             RoomDAO roomDao = null,
@@ -141,55 +159,76 @@ namespace CanvasApp.Server
             }
         }
 
+        // Per-room locks for canvas loading. Without these, two clients joining at the same
+        // moment would both fall through TryAdd — the winner triggers the DB load, but the
+        // loser returns IMMEDIATELY and reads an empty _canvasState before the winner finishes
+        // populating it. Joiners would then see a blank canvas even though the room has history.
+        private readonly ConcurrentDictionary<string, object> _canvasLoadLocks
+            = new ConcurrentDictionary<string, object>();
+
         // Lazily loads snapshot + deltas from DB on first client join.
         // After this change, only delta actions since the snapshot go into _canvasState;
         // the compressed snapshot data is cached in _snapshotCache to serve new joiners.
         private void EnsureCanvasLoaded(string roomId)
         {
             if (_snapDao == null || _drawActionDao == null) return;
-            if (!_canvasLoaded.TryAdd(roomId, true)) return;
 
-            try
+            // Fast path: already loaded by an earlier caller — no need to acquire the lock.
+            if (_canvasLoaded.ContainsKey(roomId)) return;
+
+            // Slow path: serialize on the per-room lock so concurrent joiners either run the
+            // load themselves OR wait for the in-progress load to finish.
+            var gate = _canvasLoadLocks.GetOrAdd(roomId, _ => new object());
+            lock (gate)
             {
-                var snap = _snapDao.GetLatest(roomId);
-                long startSeq = 0;
+                if (_canvasLoaded.ContainsKey(roomId)) return; // someone else won the race
 
-                if (snap != null)
+                try
                 {
-                    // Store compressed snapshot for serving new joiners — no decompression needed here
-                    _snapshotCache[roomId] = snap.SnapshotData;
-                    startSeq = snap.ActionSeqAt;
+                    var snap = _snapDao.GetLatest(roomId);
+                    long startSeq = 0;
 
-                    if (_roomStates.TryGetValue(roomId, out var rs))
+                    if (snap != null)
                     {
-                        rs.InitSeqNo(snap.ActionSeqAt);
-                        rs.SnapshotVersionFromDb(snap.Version);
+                        // Store compressed snapshot for serving new joiners — no decompression needed here
+                        _snapshotCache[roomId] = snap.SnapshotData;
+                        startSeq = snap.ActionSeqAt;
+
+                        if (_roomStates.TryGetValue(roomId, out var rs))
+                        {
+                            rs.InitSeqNo(snap.ActionSeqAt);
+                            rs.SnapshotVersionFromDb(snap.Version);
+                        }
                     }
-                }
 
-                // Only load deltas (not the full snapshot) into _canvasState
-                var deltas = _drawActionDao.GetSinceSeq(roomId, startSeq);
-                if (deltas.Count > 0)
+                    // Only load deltas (not the full snapshot) into _canvasState
+                    var deltas = _drawActionDao.GetSinceSeq(roomId, startSeq);
+                    if (deltas.Count > 0)
+                    {
+                        // Backfill synthetic ActionId for legacy DB rows so cross-client undo can target them.
+                        foreach (var d in deltas)
+                            if (string.IsNullOrEmpty(d.ActionId))
+                                d.ActionId = "srv-" + d.SeqNo;
+
+                        if (_canvasState.TryGetValue(roomId, out var stateRef))
+                            lock (stateRef) { stateRef.AddRange(deltas); }
+
+                        if (_roomStates.TryGetValue(roomId, out var rsRef))
+                            rsRef.InitSeqNo(deltas[deltas.Count - 1].SeqNo);
+                    }
+
+                    // Mark loaded LAST — late readers of the fast path will only short-circuit
+                    // once state is fully populated.
+                    _canvasLoaded[roomId] = true;
+
+                    Console.WriteLine($"[DB] Canvas loaded for room {roomId}: " +
+                                      $"{(snap != null ? "snapshot" : "no snapshot")} + {deltas.Count} deltas");
+                }
+                catch (Exception ex)
                 {
-                    // Backfill synthetic ActionId for legacy DB rows so cross-client undo can target them.
-                    foreach (var d in deltas)
-                        if (string.IsNullOrEmpty(d.ActionId))
-                            d.ActionId = "srv-" + d.SeqNo;
-
-                    if (_canvasState.TryGetValue(roomId, out var stateRef))
-                        lock (stateRef) { stateRef.AddRange(deltas); }
-
-                    if (_roomStates.TryGetValue(roomId, out var rsRef))
-                        rsRef.InitSeqNo(deltas[deltas.Count - 1].SeqNo);
+                    Console.WriteLine($"[DB] EnsureCanvasLoaded failed for {roomId}: {ex.Message}");
+                    // Leave _canvasLoaded unset so the next joiner retries the load.
                 }
-
-                Console.WriteLine($"[DB] Canvas loaded for room {roomId}: " +
-                                  $"{(snap != null ? "snapshot" : "no snapshot")} + {deltas.Count} deltas");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[DB] EnsureCanvasLoaded failed for {roomId}: {ex.Message}");
-                _canvasLoaded.TryRemove(roomId, out _);
             }
         }
 
@@ -237,6 +276,137 @@ namespace CanvasApp.Server
             Console.WriteLine($"  [Room] Created '{room.Name}' ({room.Id}) " +
                               $"code={room.InviteCode} by {owner.Username}");
             return room;
+        }
+
+        // ── Owner-only room admin (called by ROOM_DELETE / ROOM_UPDATE_PASSWORD) ────
+
+        /// <summary>
+        /// Returns the in-memory Room (NOT cloned). Caller treats it as read-only.
+        /// </summary>
+        public Room GetRoom(string roomId)
+        {
+            if (string.IsNullOrEmpty(roomId)) return null;
+            _rooms.TryGetValue(roomId, out var r);
+            return r;
+        }
+
+        // Set of roomIds currently mid-delete. Join must refuse to add a client to a room
+        // whose id is in this set, otherwise a delete that observed IsRoomEmpty=true and then
+        // unwound the dictionaries could race with a concurrent Join, leaving the joiner
+        // attached to a phantom roomClients list that no broadcast reaches.
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _deleting
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Atomic delete: returns false if another caller is already deleting this room, OR if
+        /// a client occupies the room. Holds the roomClients lock for the recheck so a Join
+        /// that wins the race adds itself before the empty-check, blocking the delete.
+        /// </summary>
+        public bool TryDeleteRoomIfEmpty(string roomId, out string failReason)
+        {
+            failReason = null;
+            if (!_rooms.TryGetValue(roomId, out var room)) { failReason = "Phòng không tồn tại"; return false; }
+            if (!_deleting.TryAdd(roomId, 0)) { failReason = "Đang xử lý xóa phòng khác"; return false; }
+
+            try
+            {
+                // Recheck membership under the same lock Join uses so a race-winning joiner
+                // can't slip in between "empty" and the TryRemove below.
+                if (_roomClients.TryGetValue(roomId, out var list))
+                {
+                    lock (list)
+                    {
+                        if (list.Count > 0) { failReason = "Phòng còn người trong — không thể xóa"; return false; }
+                    }
+                }
+                return DeleteRoomInternal(roomId, room);
+            }
+            finally { _deleting.TryRemove(roomId, out _); }
+        }
+
+        /// <summary>
+        /// Soft-delete used by peer sync: blindly drop the room from in-memory + DB. Skips the
+        /// "is empty" check because the originating server already enforced it.
+        /// </summary>
+        public bool DeleteRoom(string roomId)
+        {
+            if (!_rooms.TryGetValue(roomId, out var room)) return false;
+            return DeleteRoomInternal(roomId, room);
+        }
+
+        private bool DeleteRoomInternal(string roomId, Room room)
+        {
+            if (!_rooms.TryRemove(roomId, out _)) return false;
+
+            _canvasState.TryRemove(roomId, out _);
+            _roomClients.TryRemove(roomId, out _);
+            _roomStates.TryRemove(roomId, out _);
+            _canvasLoaded.TryRemove(roomId, out _);
+            _snapshotCache.TryRemove(roomId, out _);
+            _lastEmptyTime.TryRemove(roomId, out _);
+            _undoStacks.TryRemove(roomId, out _);
+            if (!string.IsNullOrEmpty(room.InviteCode))
+                _codeToRoomId.TryRemove(room.InviteCode, out _);
+
+            if (_roomDao != null)
+            {
+                try { _roomDao.SetActive(roomId, false); }
+                catch (Exception ex) { Console.WriteLine($"  [DB] DeleteRoom persist failed: {ex.Message}"); }
+            }
+            Console.WriteLine($"  [Room] Deleted '{room.Name}' ({roomId})");
+            return true;
+        }
+
+        /// <summary>
+        /// Update (or remove if newPassword is null/empty) the room's password.
+        /// Returns the new hash (or null if password was removed); returns null + false via
+        /// out param if the room is not found. Mutates the in-memory Room under a lock so
+        /// Resolve/Join callers never observe a half-updated state (HasPassword=true with
+        /// PasswordHash=null would make BCrypt.Verify throw).
+        /// </summary>
+        public bool UpdateRoomPassword(string roomId, string newPassword, out string newHash)
+        {
+            newHash = null;
+            if (!_rooms.TryGetValue(roomId, out var room)) return false;
+
+            string hash = string.IsNullOrEmpty(newPassword)
+                ? null
+                : BCrypt.Net.BCrypt.HashPassword(newPassword, 10);
+
+            // Atomic from any other reader's perspective: HasPassword and PasswordHash
+            // must flip together. lock(room) is shared with Resolve below.
+            lock (room)
+            {
+                room.PasswordHash = hash;
+                room.HasPassword = hash != null;
+            }
+
+            if (_roomDao != null)
+            {
+                try { _roomDao.UpdatePasswordHash(roomId, hash); }
+                catch (Exception ex) { Console.WriteLine($"  [DB] UpdateRoomPassword persist failed: {ex.Message}"); }
+            }
+            Console.WriteLine($"  [Room] Password updated for '{room.Name}' ({roomId}) hasPwd={room.HasPassword}");
+            newHash = hash;
+            return true;
+        }
+
+        /// <summary>
+        /// Apply a PEER_ROOM_PASSWORD_UPDATED envelope: copy the hash from the originating
+        /// server into local memory only (no DB write — origin already did that, and double
+        /// writing would defeat the unique-writer guarantee for the rooms table).
+        /// </summary>
+        public bool ApplyPeerPasswordHash(string roomId, string passwordHash)
+        {
+            if (string.IsNullOrEmpty(roomId)) return false;
+            if (!_rooms.TryGetValue(roomId, out var room)) return false;
+            lock (room)
+            {
+                room.PasswordHash = string.IsNullOrEmpty(passwordHash) ? null : passwordHash;
+                room.HasPassword = !string.IsNullOrEmpty(passwordHash);
+            }
+            Console.WriteLine($"  [Room] Peer password sync applied to '{room.Name}' ({roomId}) hasPwd={room.HasPassword}");
+            return true;
         }
 
         private string GenerateInviteCode()
@@ -309,7 +479,13 @@ namespace CanvasApp.Server
             if (!_rooms.TryGetValue(req.RoomId, out var room))
                 return new ResolveRoomResult { Success = false, Message = "Room không tồn tại" };
 
-            if (room.HasPassword)
+            // Snapshot the (HasPassword, PasswordHash) pair under the lock that
+            // UpdateRoomPassword takes, so we never see HasPassword=true with a null hash.
+            bool needsPwd;
+            string hash;
+            lock (room) { needsPwd = room.HasPassword; hash = room.PasswordHash; }
+
+            if (needsPwd)
             {
                 if (string.IsNullOrEmpty(req.Password))
                     return new ResolveRoomResult
@@ -318,7 +494,7 @@ namespace CanvasApp.Server
                         Message = "Phòng yêu cầu mật khẩu",
                         RequiresPassword = true
                     };
-                if (!BCrypt.Net.BCrypt.Verify(req.Password, room.PasswordHash))
+                if (string.IsNullOrEmpty(hash) || !BCrypt.Net.BCrypt.Verify(req.Password, hash))
                     return new ResolveRoomResult { Success = false, Message = "Sai mật khẩu" };
             }
 
@@ -332,7 +508,17 @@ namespace CanvasApp.Server
             if (!_rooms.TryGetValue(req.RoomId, out var room))
                 return new JoinRoomResult { Success = false, Message = "Room không tồn tại" };
 
-            if (room.HasPassword)
+            // Refuse joins for rooms mid-delete so we never end up attached to a roomClients
+            // list that's about to be discarded by TryDeleteRoomIfEmpty.
+            if (_deleting.ContainsKey(req.RoomId))
+                return new JoinRoomResult { Success = false, Message = "Phòng đang được xóa, vui lòng thử phòng khác" };
+
+            // Same atomic snapshot as Resolve — see comment there.
+            bool needsPwd;
+            string hash;
+            lock (room) { needsPwd = room.HasPassword; hash = room.PasswordHash; }
+
+            if (needsPwd)
             {
                 if (string.IsNullOrEmpty(req.Password))
                     return new JoinRoomResult
@@ -341,13 +527,23 @@ namespace CanvasApp.Server
                         Message = "Phòng yêu cầu mật khẩu",
                         RequiresPassword = true
                     };
-                if (!BCrypt.Net.BCrypt.Verify(req.Password, room.PasswordHash))
+                if (string.IsNullOrEmpty(hash) || !BCrypt.Net.BCrypt.Verify(req.Password, hash))
                     return new JoinRoomResult { Success = false, Message = "Sai mật khẩu" };
             }
 
             EnsureCanvasLoaded(req.RoomId);
 
             _roomClients.GetOrAdd(room.Id, _ => new List<ConnectedClient>());
+
+            // Fetch chat history BEFORE adding the joiner to the broadcast list. Otherwise
+            // a CHAT_MESSAGE that arrives between admit and history-fetch would be delivered
+            // twice — once via the live broadcast, once via the history snapshot.
+            List<ChatMessage> historySnapshot = null;
+            if (_chatDao != null)
+            {
+                try { historySnapshot = _chatDao.GetByRoom(room.Id, 50); }
+                catch (Exception ex) { Console.WriteLine($"  [DB] ChatHistory fetch failed: {ex.Message}"); }
+            }
 
             lock (_roomClients[room.Id])
             {
@@ -395,7 +591,8 @@ namespace CanvasApp.Server
                 Room = room,
                 SnapshotData = snapshotData,
                 CanvasState = deltas,
-                Members = GetMembers(room.Id)
+                Members = GetMembers(room.Id),
+                ChatHistory = historySnapshot ?? new List<ChatMessage>()
             };
         }
 
@@ -820,6 +1017,12 @@ namespace CanvasApp.Server
         public async Task ApplyFromPeerAsync(string roomId, string originServerId, Message inner)
         {
             if (inner == null || string.IsNullOrEmpty(roomId)) return;
+            // Self-loop guard: a misconfigured peer list can leave a server connected back
+            // to itself. Without this, every local broadcast would also arrive as a PEER_RELAY
+            // and be re-broadcast — making chat messages and join notifications appear twice.
+            if (!string.IsNullOrEmpty(SelfServerId)
+                && string.Equals(originServerId, SelfServerId, StringComparison.Ordinal))
+                return;
             // Don't ghost-create rooms — if this server has never heard of the room, skip the
             // action. A future join on this server will load fresh state from DB.
             if (!_rooms.ContainsKey(roomId)) return;

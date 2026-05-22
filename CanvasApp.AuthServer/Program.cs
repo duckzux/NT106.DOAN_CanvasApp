@@ -52,6 +52,25 @@ namespace CanvasApp.AuthServer
                 return;
             }
 
+            // Background OTP cleanup: drop rows whose grace window has passed so the
+            // table stays bounded. Runs every 30 minutes — first sweep happens right away.
+            _ = Task.Run(async () =>
+            {
+                while (true)
+                {
+                    try
+                    {
+                        int n = otpStore.DeleteExpired(graceHours: 24);
+                        if (n > 0) Console.WriteLine($"[OtpStore] cleaned {n} expired OTP row(s)");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[OtpStore] cleanup error: {ex.Message}");
+                    }
+                    await Task.Delay(TimeSpan.FromMinutes(30));
+                }
+            });
+
             var server = new AuthServer(port, store, otpStore);
             await server.StartAsync();
         }

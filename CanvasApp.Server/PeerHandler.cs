@@ -40,6 +40,18 @@ namespace CanvasApp.Server
                                 var hello = msg.GetData<PeerHelloPayload>();
                                 if (hello != null)
                                 {
+                                    // Drop self-connections at the door. If the peer list is
+                                    // misconfigured (e.g. two servers share the same appsettings
+                                    // and one ends up pointing at its own peer listener), the
+                                    // accepted socket would be looping every event back to us —
+                                    // doubling chat / join notifications. Bail out before we
+                                    // record self as a "peer".
+                                    if (!string.IsNullOrEmpty(roomManager.SelfServerId)
+                                        && string.Equals(hello.ServerId, roomManager.SelfServerId, StringComparison.Ordinal))
+                                    {
+                                        Console.WriteLine($"[PEER] inbound <- {remote} dropped (self-loop, id={hello.ServerId})");
+                                        return;
+                                    }
                                     peerId = hello.ServerId;
                                     Console.WriteLine($"[PEER] inbound <- {remote} hello (id={peerId}, " +
                                                       $"rooms={hello.KnownRooms?.Count ?? 0}, " +
@@ -68,6 +80,25 @@ namespace CanvasApp.Server
                             {
                                 var room = msg.GetData<Room>();
                                 if (room != null && roomManager.RegisterPeerRoom(room))
+                                    await roomManager.BroadcastLobbyRoomListAsync();
+                                break;
+                            }
+
+                            case MessageType.PEER_ROOM_DELETE:
+                            {
+                                // Payload is just the roomId string. Drop the room from this
+                                // server's in-memory state and push a refreshed lobby list so
+                                // local lobby clients see the card disappear immediately.
+                                var roomId = msg.GetData<string>();
+                                if (!string.IsNullOrEmpty(roomId) && roomManager.DeleteRoom(roomId))
+                                    await roomManager.BroadcastLobbyRoomListAsync();
+                                break;
+                            }
+
+                            case MessageType.PEER_ROOM_PASSWORD_UPDATED:
+                            {
+                                var payload = msg.GetData<PeerRoomPasswordPayload>();
+                                if (payload != null && roomManager.ApplyPeerPasswordHash(payload.RoomId, payload.PasswordHash))
                                     await roomManager.BroadcastLobbyRoomListAsync();
                                 break;
                             }

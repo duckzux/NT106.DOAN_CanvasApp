@@ -77,6 +77,20 @@ namespace CanvasApp.Common.DataAccess
             }
         }
 
+        // Pass null/empty hash to make the room public again.
+        public void UpdatePasswordHash(string roomId, string passwordHash)
+        {
+            using (var conn = DatabaseManager.OpenConnection())
+            {
+                var cmd = new MySqlCommand(
+                    "UPDATE rooms SET password_hash=@p WHERE id=@id", conn);
+                cmd.Parameters.AddWithValue("@p",
+                    string.IsNullOrEmpty(passwordHash) ? (object)DBNull.Value : passwordHash);
+                cmd.Parameters.AddWithValue("@id", roomId);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
         private Room MapRow(MySqlDataReader r)
         {
             var pwdOrd = r.GetOrdinal("password_hash");

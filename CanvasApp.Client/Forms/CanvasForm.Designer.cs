@@ -100,7 +100,7 @@ namespace CanvasApp.Client
             this.pnlHeader.Controls.Add(this.ctrlClose);
             this.pnlHeader.Controls.Add(this.ctrlMaximize);
             this.pnlHeader.Dock = System.Windows.Forms.DockStyle.Top;
-            this.pnlHeader.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(199)))), ((int)(((byte)(173)))), ((int)(((byte)(255)))));
+            this.pnlHeader.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
             this.pnlHeader.Location = new System.Drawing.Point(0, 0);
             this.pnlHeader.Name = "pnlHeader";
             this.pnlHeader.Size = new System.Drawing.Size(1200, 45);
@@ -161,7 +161,7 @@ namespace CanvasApp.Client
             this.pnlRight.Controls.Add(this.lblRoomCode);
             this.pnlRight.Controls.Add(this.lblRoomName);
             this.pnlRight.Dock = System.Windows.Forms.DockStyle.Right;
-            this.pnlRight.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(235)))), ((int)(((byte)(224)))), ((int)(((byte)(255)))));
+            this.pnlRight.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(192)))), ((int)(((byte)(192)))), ((int)(((byte)(255)))));
             this.pnlRight.Location = new System.Drawing.Point(950, 45);
             this.pnlRight.Name = "pnlRight";
             this.pnlRight.Padding = new System.Windows.Forms.Padding(10);
@@ -177,7 +177,7 @@ namespace CanvasApp.Client
             this.btnSendMessage.DisabledState.CustomBorderColor = System.Drawing.Color.DarkGray;
             this.btnSendMessage.DisabledState.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(169)))), ((int)(((byte)(169)))), ((int)(((byte)(169)))));
             this.btnSendMessage.DisabledState.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(141)))), ((int)(((byte)(141)))), ((int)(((byte)(141)))));
-            this.btnSendMessage.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(172)))), ((int)(((byte)(139)))), ((int)(((byte)(238)))));
+            this.btnSendMessage.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
             this.btnSendMessage.Font = new System.Drawing.Font("Segoe UI", 10F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.btnSendMessage.ForeColor = System.Drawing.Color.WhiteSmoke;
             this.btnSendMessage.Location = new System.Drawing.Point(190, 696);
@@ -196,7 +196,7 @@ namespace CanvasApp.Client
             this.btnAttachFile.DisabledState.CustomBorderColor = System.Drawing.Color.DarkGray;
             this.btnAttachFile.DisabledState.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(169)))), ((int)(((byte)(169)))), ((int)(((byte)(169)))));
             this.btnAttachFile.DisabledState.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(141)))), ((int)(((byte)(141)))), ((int)(((byte)(141)))));
-            this.btnAttachFile.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(172)))), ((int)(((byte)(139)))), ((int)(((byte)(238)))));
+            this.btnAttachFile.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(86)))), ((int)(((byte)(207)))));
             this.btnAttachFile.Font = new System.Drawing.Font("Segoe UI", 6F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.btnAttachFile.ForeColor = System.Drawing.Color.WhiteSmoke;
             this.btnAttachFile.Location = new System.Drawing.Point(6, 696);
@@ -464,7 +464,7 @@ namespace CanvasApp.Client
             // 
             // statusStrip1
             // 
-            this.statusStrip1.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(199)))), ((int)(((byte)(173)))), ((int)(((byte)(255)))));
+            this.statusStrip1.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(192)))), ((int)(((byte)(192)))), ((int)(((byte)(255)))));
             this.statusStrip1.ImageScalingSize = new System.Drawing.Size(20, 20);
             this.statusStrip1.Items.AddRange(new System.Windows.Forms.ToolStripItem[] {
             this.lblConnectionStatus,

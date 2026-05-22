@@ -39,6 +39,7 @@ namespace CanvasApp.Client
             this.guna2DragControl1 = new Guna.UI2.WinForms.Guna2DragControl(this.components);
             this.pnlRight = new Guna.UI2.WinForms.Guna2Panel();
             this.btnSendMessage = new Guna.UI2.WinForms.Guna2Button();
+            this.btnAttachFile = new Guna.UI2.WinForms.Guna2Button();
             this.txtMessageInput = new Guna.UI2.WinForms.Guna2TextBox();
             this.rtbChatHistory = new System.Windows.Forms.RichTextBox();
             this.pnlUserList = new Guna.UI2.WinForms.Guna2Panel();
@@ -71,6 +72,7 @@ namespace CanvasApp.Client
             this.btnRectangle = new System.Windows.Forms.ToolStripButton();
             this.btnCircle = new System.Windows.Forms.ToolStripButton();
             this.btnLine = new System.Windows.Forms.ToolStripButton();
+            this.btnTriangle = new System.Windows.Forms.ToolStripButton();
             this.btnArrow = new System.Windows.Forms.ToolStripButton();
             this.btnText = new System.Windows.Forms.ToolStripButton();
             this.btnColor = new System.Windows.Forms.ToolStripButton();
@@ -151,6 +153,7 @@ namespace CanvasApp.Client
             // pnlRight
             // 
             this.pnlRight.Controls.Add(this.btnSendMessage);
+            this.pnlRight.Controls.Add(this.btnAttachFile);
             this.pnlRight.Controls.Add(this.txtMessageInput);
             this.pnlRight.Controls.Add(this.rtbChatHistory);
             this.pnlRight.Controls.Add(this.pnlUserList);
@@ -175,13 +178,33 @@ namespace CanvasApp.Client
             this.btnSendMessage.DisabledState.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(169)))), ((int)(((byte)(169)))), ((int)(((byte)(169)))));
             this.btnSendMessage.DisabledState.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(141)))), ((int)(((byte)(141)))), ((int)(((byte)(141)))));
             this.btnSendMessage.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(172)))), ((int)(((byte)(139)))), ((int)(((byte)(238)))));
-            this.btnSendMessage.Font = new System.Drawing.Font("Segoe UI", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.btnSendMessage.Font = new System.Drawing.Font("Segoe UI", 10F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.btnSendMessage.ForeColor = System.Drawing.Color.WhiteSmoke;
-            this.btnSendMessage.Location = new System.Drawing.Point(194, 696);
+            this.btnSendMessage.Location = new System.Drawing.Point(190, 696);
             this.btnSendMessage.Name = "btnSendMessage";
-            this.btnSendMessage.Size = new System.Drawing.Size(49, 45);
+            this.btnSendMessage.Size = new System.Drawing.Size(52, 42);
             this.btnSendMessage.TabIndex = 4;
-            this.btnSendMessage.Text = " ➤";
+            this.btnSendMessage.Text = ">";
+            // 
+            // btnAttachFile
+            // 
+            this.btnAttachFile.Animated = true;
+            this.btnAttachFile.BackColor = System.Drawing.Color.Transparent;
+            this.btnAttachFile.BorderRadius = 20;
+            this.btnAttachFile.Cursor = System.Windows.Forms.Cursors.Hand;
+            this.btnAttachFile.DisabledState.BorderColor = System.Drawing.Color.DarkGray;
+            this.btnAttachFile.DisabledState.CustomBorderColor = System.Drawing.Color.DarkGray;
+            this.btnAttachFile.DisabledState.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(169)))), ((int)(((byte)(169)))), ((int)(((byte)(169)))));
+            this.btnAttachFile.DisabledState.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(141)))), ((int)(((byte)(141)))), ((int)(((byte)(141)))));
+            this.btnAttachFile.FillColor = System.Drawing.Color.FromArgb(((int)(((byte)(172)))), ((int)(((byte)(139)))), ((int)(((byte)(238)))));
+            this.btnAttachFile.Font = new System.Drawing.Font("Segoe UI", 6F, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.btnAttachFile.ForeColor = System.Drawing.Color.WhiteSmoke;
+            this.btnAttachFile.Location = new System.Drawing.Point(6, 696);
+            this.btnAttachFile.Name = "btnAttachFile";
+            this.btnAttachFile.Size = new System.Drawing.Size(36, 42);
+            this.btnAttachFile.TabIndex = 6;
+            this.btnAttachFile.Text = "+";
+            this.btnAttachFile.Click += new System.EventHandler(this.btnAttachFile_Click);
             // 
             // txtMessageInput
             // 
@@ -196,12 +219,12 @@ namespace CanvasApp.Client
             this.txtMessageInput.FocusedState.BorderColor = System.Drawing.Color.FromArgb(((int)(((byte)(94)))), ((int)(((byte)(148)))), ((int)(((byte)(255)))));
             this.txtMessageInput.Font = new System.Drawing.Font("Segoe UI", 9F);
             this.txtMessageInput.HoverState.BorderColor = System.Drawing.Color.FromArgb(((int)(((byte)(94)))), ((int)(((byte)(148)))), ((int)(((byte)(255)))));
-            this.txtMessageInput.Location = new System.Drawing.Point(6, 693);
+            this.txtMessageInput.Location = new System.Drawing.Point(48, 693);
             this.txtMessageInput.Margin = new System.Windows.Forms.Padding(3, 4, 3, 4);
             this.txtMessageInput.Name = "txtMessageInput";
             this.txtMessageInput.PlaceholderText = "Nhập tin nhắn...";
             this.txtMessageInput.SelectedText = "";
-            this.txtMessageInput.Size = new System.Drawing.Size(182, 48);
+            this.txtMessageInput.Size = new System.Drawing.Size(136, 48);
             this.txtMessageInput.TabIndex = 3;
             // 
             // rtbChatHistory
@@ -538,6 +561,18 @@ namespace CanvasApp.Client
             this.btnLine.Size = new System.Drawing.Size(43, 34);
             this.btnLine.Text = "Đường thẳng";
             // 
+            // btnTriangle
+            // 
+            this.btnTriangle.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Text;
+            this.btnTriangle.Font = new System.Drawing.Font("Segoe UI", 16F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
+            this.btnTriangle.ImageTransparentColor = System.Drawing.Color.Magenta;
+            this.btnTriangle.Name = "btnTriangle";
+            this.btnTriangle.Padding = new System.Windows.Forms.Padding(3);
+            this.btnTriangle.Size = new System.Drawing.Size(43, 47);
+            this.btnTriangle.Text = "△";
+            this.btnTriangle.ToolTipText = "Hình tam giác";
+            this.btnTriangle.Click += new System.EventHandler(this.btnTriangle_Click);
+            // 
             // btnArrow
             // 
             this.btnArrow.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
@@ -631,6 +666,7 @@ namespace CanvasApp.Client
             this.btnRectangle,
             this.btnCircle,
             this.btnLine,
+            this.btnTriangle,
             this.btnArrow,
             this.btnText,
             this.btnColor,
@@ -727,6 +763,7 @@ namespace CanvasApp.Client
         private Guna.UI2.WinForms.Guna2Panel pnlUserList;
         private Guna.UI2.WinForms.Guna2TextBox txtMessageInput;
         private Guna.UI2.WinForms.Guna2Button btnSendMessage;
+        private Guna.UI2.WinForms.Guna2Button btnAttachFile;
         private Guna.UI2.WinForms.Guna2Button btnAddColor;
 
         // ── Standard WinForms controls ────────────────────────────────────
@@ -744,6 +781,7 @@ namespace CanvasApp.Client
         private System.Windows.Forms.ToolStripButton btnRectangle;
         private System.Windows.Forms.ToolStripButton btnCircle;
         private System.Windows.Forms.ToolStripButton btnLine;
+        private System.Windows.Forms.ToolStripButton btnTriangle;
         private System.Windows.Forms.ToolStripButton btnArrow;
         private System.Windows.Forms.ToolStripButton btnText;
         private System.Windows.Forms.ToolStripButton btnColor;

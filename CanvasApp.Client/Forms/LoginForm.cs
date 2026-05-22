@@ -26,6 +26,14 @@ namespace CanvasApp.Client
             this.Hide();
         }
 
+        private void lbForgot_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
+        {
+            using (var dlg = new ForgotPasswordForm())
+            {
+                dlg.ShowDialog(this);
+            }
+        }
+
         private async void btnLogin_Click_1(object sender, EventArgs e)
         {
             string username = txtUsername.TextValue;
@@ -58,14 +66,8 @@ namespace CanvasApp.Client
             Session.CurrentUser = result.User;
             Session.Token = result.Token;
 
-            // Kết nối persistent đến Canvas Server
-            bool connected = await CanvasClient.Instance.ConnectAsync();
-            if (!connected)
-            {
-                MessageBox.Show("Không kết nối được Canvas Server. Vui lòng kiểm tra server.",
-                    "Lỗi mạng", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
+            // ✅ KHÔNG connect Canvas Server ở đây
+            // Connection sẽ được thực hiện khi user bấm Join phòng
 
             var lobby = new LobbyForm();
             lobby.Show();

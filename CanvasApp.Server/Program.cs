@@ -9,19 +9,27 @@ using System.Threading;
 using System.Threading.Tasks;
 using CanvasApp.Common;
 using CanvasApp.Common.DataAccess;
+using Newtonsoft.Json.Linq;
 
 namespace CanvasApp.Server
 {
     class Program
     {
-        private const int PORT = 9002;
+        private const int DefaultPort = 9002;
         private static RoomManager _roomManager;
         private static AutoSaveService _autoSave;
         private static DrawActionDAO _drawActionDao;
         private static ChatMessageDAO _chatDao;
+        private static PeerManager _peerManager;
+        // Used by PEER_RELAY envelopes so a publisher can identify itself to receivers.
+        private static string _serverId;
+        // ✅ Server's public address (returned to clients for direct connection after LB redirect)
+        private static string _serverHost = "127.0.0.1";
+        private static int _serverPort = DefaultPort;
 
-        // Max payload size per message (64 KB). Rejects oversized action_data.
-        private const int MaxPayloadBytes = 65_536;
+        // Max payload size per message. Rejects oversized payloads.
+        // File attachments (CHAT_FILE) can be up to 2 MB raw → ~2.7 MB base64; allow 4 MB total.
+        private const int MaxPayloadBytes = 4_194_304;
         // Max room name length
         private const int MaxRoomNameLength = 100;
         // Regex for HTML-style color string (#RRGGBB or #RGB)
@@ -67,10 +75,88 @@ namespace CanvasApp.Server
                 _roomManager = new RoomManager();
             }
 
-            var listener = new TcpListener(IPAddress.Any, PORT);
+            // Resolution order: args[0] (e.g. `CanvasApp.Server.exe 9003`) → Config/appsettings.json → default.
+            // CLI arg ưu tiên hơn để dễ chạy nhiều instance từ Visual Studio
+            // (Project → Debug → Application arguments).
+            int port;
+            if (args != null && args.Length > 0 && int.TryParse(args[0], out var argPort))
+            {
+                port = argPort;
+                Console.WriteLine($"[CONFIG] Server port from CLI arg: {port}");
+            }
+            else
+            {
+                port = LoadServerPortOrDefault();
+            }
+
+            try { Console.Title = $"CanvasServer :{port}"; } catch { }
+
+            // ✅ Set server's public address (used when joining room to tell client where to connect)
+            _serverPort = port;
+
+            // Peer mesh setup — runs in parallel with the client listener.
+            //   • Peer listen port = client port + 100 (convention: 9002 ↔ 9102, 9003 ↔ 9103)
+            //   • Peers list: CLI arg [1] (comma-sep "host:peerPort") wins, else appsettings.
+            //   • ServerId: "canvas-{clientPort}" — unique per instance on the box.
+            _serverId = $"canvas-{port}";
+            int peerListenPort = port + 100;
+            var peerAddresses = args != null && args.Length > 1 && !string.IsNullOrWhiteSpace(args[1])
+                ? args[1].Split(',')
+                : LoadPeersFromConfig();
+
+            _peerManager = new PeerManager(_serverId, peerAddresses,
+                () => new PeerHelloPayload
+                {
+                    ServerId = _serverId,
+                    Rooms = _roomManager.GetAllLocalMembers(),
+                    // Ship the room list too so a freshly-reconnecting peer learns about
+                    // rooms created during its downtime (DB load only runs once at startup).
+                    KnownRooms = _roomManager.GetAllKnownRooms()
+                });
+            // When a peer reconnects after being down, sync canvas state for active rooms
+            _peerManager.OnPeerReconnected += async (peerAddr) =>
+            {
+                try
+                {
+                    foreach (var roomId in _roomManager.GetDirtyRoomIds())
+                    {
+                        var canvasState = _roomManager.GetCanvasState(roomId);
+                        if (canvasState != null && canvasState.Count > 0)
+                        {
+                            var payload = new PeerCanvasSyncPayload
+                            {
+                                RoomId = roomId,
+                                OriginServerId = _serverId,
+                                Actions = canvasState
+                            };
+                            var syncMsg = new Message(MessageType.PEER_CANVAS_SYNC, payload);
+                            await _peerManager.PublishAsync(syncMsg);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[PEER] Canvas sync on reconnect failed: {ex.Message}");
+                }
+            };
+            _peerManager.Start();
+
+            var peerListener = new TcpListener(IPAddress.Any, peerListenPort);
+            peerListener.Start();
+            Console.WriteLine($"[PEER] inbound listener on :{peerListenPort}");
+            _ = Task.Run(async () =>
+            {
+                while (true)
+                {
+                    var peerTcp = await peerListener.AcceptTcpClientAsync();
+                    _ = Task.Run(() => PeerHandler.HandleAsync(peerTcp, _roomManager));
+                }
+            });
+
+            var listener = new TcpListener(IPAddress.Any, port);
             listener.Start();
             Console.WriteLine("╔══════════════════════════════════════╗");
-            Console.WriteLine($"║   CANVAS SERVER listening on :{PORT}    ║");
+            Console.WriteLine($"║   CANVAS SERVER listening on :{port}    ║");
             Console.WriteLine("╚══════════════════════════════════════╝");
 
             while (true)
@@ -80,10 +166,85 @@ namespace CanvasApp.Server
             }
         }
 
+        // Wrap an inner message in a PEER_RELAY envelope and push it to every connected peer.
+        // Callers should fire this AFTER BroadcastAsync has fanned the message out locally —
+        // peer servers then broadcast the same inner message to their own clients in the room.
+        private static Task PublishToPeersAsync(string roomId, Message inner)
+        {
+            if (_peerManager == null || string.IsNullOrEmpty(roomId)) return Task.CompletedTask;
+            var envelope = new Message(MessageType.PEER_RELAY, new PeerRelayPayload
+            {
+                RoomId = roomId,
+                OriginServerId = _serverId,
+                Inner = inner
+            });
+            return _peerManager.PublishAsync(envelope);
+        }
+
+        // Tell peers the up-to-date local membership for a room. Fired after every local
+        // join/leave so peers' merged GetRoomList() / GetMembers() reflect the change.
+        private static Task PublishLocalMembersAsync(string roomId)
+        {
+            if (_peerManager == null || string.IsNullOrEmpty(roomId)) return Task.CompletedTask;
+            var payload = new PeerMembersPayload
+            {
+                RoomId = roomId,
+                OriginServerId = _serverId,
+                Members = _roomManager.GetLocalMembers(roomId)
+            };
+            return _peerManager.PublishAsync(new Message(MessageType.PEER_MEMBER_SYNC, payload));
+        }
+
+        private static string[] LoadPeersFromConfig()
+        {
+            try
+            {
+                var cfgPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Config", "appsettings.json");
+                if (!File.Exists(cfgPath)) cfgPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "appsettings.json");
+                if (!File.Exists(cfgPath)) return new string[0];
+
+                var jo = JObject.Parse(File.ReadAllText(cfgPath));
+                var arr = jo.SelectToken("ServerSettings.Peers") as JArray;
+                if (arr == null) return new string[0];
+                var list = new System.Collections.Generic.List<string>();
+                foreach (var t in arr)
+                    if (t.Type == JTokenType.String) list.Add(t.Value<string>());
+                return list.ToArray();
+            }
+            catch { return new string[0]; }
+        }
+
+        private static int LoadServerPortOrDefault()
+        {
+            try
+            {
+                var cfgPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Config", "appsettings.json");
+                if (!File.Exists(cfgPath)) cfgPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "appsettings.json");
+                if (!File.Exists(cfgPath)) return DefaultPort;
+
+                var json = File.ReadAllText(cfgPath);
+                var jo = JObject.Parse(json);
+                var token = jo.SelectToken("ServerSettings.Port");
+                if (token != null && token.Type == JTokenType.Integer)
+                {
+                    var port = token.Value<int>();
+                    Console.WriteLine($"[CONFIG] Server port loaded from {cfgPath}: {port}");
+                    return port;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[CONFIG] Failed to load port from appsettings.json: {ex.Message}");
+            }
+
+            return DefaultPort;
+        }
+
         private static async Task HandleClient(TcpClient tcp)
         {
             var endpoint = tcp.Client.RemoteEndPoint.ToString();
-            Console.WriteLine($"[+] Client {endpoint} connected");
+            // Silent probes (LB health check: connect + close, 0 bytes) stay un-logged.
+            bool gotData = false;
 
             var client = new ConnectedClient { Tcp = tcp };
             _roomManager.RegisterClient(client);
@@ -98,13 +259,19 @@ namespace CanvasApp.Server
                     string line;
                     while ((line = await reader.ReadLineAsync()) != null)
                     {
+                        if (!gotData)
+                        {
+                            gotData = true;
+                            Console.WriteLine($"[+] Client {endpoint} connected");
+                        }
                         await ProcessAsync(client, line);
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[!] {endpoint} {ex.Message}");
+                if (gotData)
+                    Console.WriteLine($"[!] {endpoint} {ex.Message}");
             }
             finally
             {
@@ -116,12 +283,16 @@ namespace CanvasApp.Server
 
                 if (!string.IsNullOrEmpty(leftRoomId))
                 {
-                    await _roomManager.BroadcastAsync(leftRoomId,
-                        new Message(MessageType.ROOM_UPDATE, new RoomMembersUpdate
-                        {
-                            Members = _roomManager.GetMembers(leftRoomId),
-                            LeftUsername = leftUsername
-                        }));
+                    var updateMsg = new Message(MessageType.ROOM_UPDATE, new RoomMembersUpdate
+                    {
+                        Members = _roomManager.GetMembers(leftRoomId),
+                        LeftUsername = leftUsername
+                    });
+                    await _roomManager.BroadcastAsync(leftRoomId, updateMsg);
+                    // Peer mesh: tell other Canvas servers about the leave + new member list
+                    // so their merged GetMembers()/GetRoomList() drop this user immediately.
+                    await PublishToPeersAsync(leftRoomId, updateMsg);
+                    await PublishLocalMembersAsync(leftRoomId);
 
                     // Notify lobby clients so their user-count badges update
                     var lobbyUpdate = new Message(MessageType.ROOM_LIST_RESULT,
@@ -133,7 +304,8 @@ namespace CanvasApp.Server
                 }
 
                 tcp.Close();
-                Console.WriteLine($"[-] {endpoint} disconnected");
+                if (gotData)
+                    Console.WriteLine($"[-] {endpoint} disconnected");
             }
         }
 
@@ -175,6 +347,17 @@ namespace CanvasApp.Server
                             new RoomListResult { Rooms = _roomManager.GetRoomList() }));
                         break;
 
+                    case MessageType.RESOLVE_INVITE_CODE:
+                    {
+                        var resolveReq = msg.GetData<ResolveInviteCodeRequest>();
+                        var room = _roomManager.GetRoomByInviteCode(resolveReq?.InviteCode);
+                        var result = room != null
+                            ? new ResolveInviteCodeResult { Success = true, RoomId = room.Id }
+                            : new ResolveInviteCodeResult { Success = false, Message = "Mã mời không hợp lệ" };
+                        await client.SendAsync(new Message(MessageType.RESOLVE_INVITE_CODE_RESULT, result));
+                        break;
+                    }
+
                     case MessageType.ROOM_CREATE:
                     {
                         var createReq = msg.GetData<CreateRoomRequest>();
@@ -190,6 +373,13 @@ namespace CanvasApp.Server
                         var room = _roomManager.CreateRoom(createReq, client);
                         await client.SendAsync(new Message(MessageType.ROOM_CREATE_RESULT, room));
 
+                        // Tell peers about the new room BEFORE the local lobby broadcast so
+                        // any subsequent peer events for this room (e.g. an immediate join
+                        // arriving via PEER_RELAY) won't be dropped by peer's "unknown room"
+                        // guard in ApplyFromPeerAsync.
+                        if (_peerManager != null)
+                            await _peerManager.PublishAsync(new Message(MessageType.PEER_ROOM_CREATE, room));
+
                         // Notify all other lobby clients about the new room
                         var newRoomList = new Message(MessageType.ROOM_LIST_RESULT,
                             new RoomListResult { Rooms = _roomManager.GetRoomList() });
@@ -201,6 +391,21 @@ namespace CanvasApp.Server
                     {
                         var joinReq = msg.GetData<JoinRoomRequest>();
                         await HandleJoin(client, joinReq);
+                        break;
+                    }
+
+                    case MessageType.ROOM_RESOLVE:
+                    {
+                        // Routing-only query from the LB-routed short-lived socket: verify the
+                        // room + password and return where to direct-connect. NO Join, NO broadcast.
+                        var resolveReq = msg.GetData<ResolveRoomRequest>();
+                        var resolveRes = _roomManager.Resolve(resolveReq);
+                        if (resolveRes.Success)
+                        {
+                            resolveRes.ServerHost = _serverHost;
+                            resolveRes.ServerPort = _serverPort;
+                        }
+                        await client.SendAsync(new Message(MessageType.ROOM_RESOLVE_RESULT, resolveRes));
                         break;
                     }
 
@@ -229,12 +434,14 @@ namespace CanvasApp.Server
                         _roomManager.Leave(client);
                         if (!string.IsNullOrEmpty(leftRoom))
                         {
-                            await _roomManager.BroadcastAsync(leftRoom,
-                                new Message(MessageType.ROOM_UPDATE, new RoomMembersUpdate
-                                {
-                                    Members = _roomManager.GetMembers(leftRoom),
-                                    LeftUsername = leftName
-                                }));
+                            var update = new Message(MessageType.ROOM_UPDATE, new RoomMembersUpdate
+                            {
+                                Members = _roomManager.GetMembers(leftRoom),
+                                LeftUsername = leftName
+                            });
+                            await _roomManager.BroadcastAsync(leftRoom, update);
+                            await PublishToPeersAsync(leftRoom, update);
+                            await PublishLocalMembersAsync(leftRoom);
 
                             // Notify lobby clients so user counts refresh
                             var lobbyMsg = new Message(MessageType.ROOM_LIST_RESULT,
@@ -263,26 +470,59 @@ namespace CanvasApp.Server
 
                                     action.UserId = client.UserId;
                                     _roomManager.RecordDrawAction(client.CurrentRoomId, action);
+                                    // RecordDrawAction stamped action.SeqNo/ActionId — re-serialize
+                                    // so peers receive the same canonical payload local clients see.
+                                    msg = new Message(msg.Type, action) { Token = msg.Token };
                                 }
                             }
                             await _roomManager.BroadcastAsync(client.CurrentRoomId, msg, client);
+                            await PublishToPeersAsync(client.CurrentRoomId, msg);
+                        }
+                        break;
+
+                    case MessageType.DRAW_FILL:
+                        if (!string.IsNullOrEmpty(client.CurrentRoomId))
+                        {
+                            var fillAct = msg.GetData<DrawAction>();
+                            if (fillAct != null)
+                            {
+                                fillAct.UserId = client.UserId;
+                                _roomManager.RecordDrawAction(client.CurrentRoomId, fillAct);
+                                msg = new Message(msg.Type, fillAct) { Token = msg.Token };
+                            }
+                            await _roomManager.BroadcastAsync(client.CurrentRoomId, msg, client);
+                            await PublishToPeersAsync(client.CurrentRoomId, msg);
                         }
                         break;
 
                     case MessageType.DRAW_UNDO:
                         if (!string.IsNullOrEmpty(client.CurrentRoomId))
                         {
-                            var seqNo = _roomManager.UndoLastAction(client.CurrentRoomId, client.UserId);
-                            if (seqNo > 0)
+                            // Optional targeted undo (e.g. text-edit): payload may carry an explicit ActionId.
+                            // Fallback to the user's last action otherwise.
+                            var requestedNotif = msg.GetData<UndoNotification>();
+                            (long SeqNo, string ActionId) undone;
+                            if (requestedNotif != null && !string.IsNullOrEmpty(requestedNotif.ActionId))
+                                undone = _roomManager.UndoActionById(client.CurrentRoomId, requestedNotif.ActionId);
+                            else
+                                undone = _roomManager.UndoLastAction(client.CurrentRoomId, client.UserId);
+                            if (undone.SeqNo > 0)
                             {
                                 if (_drawActionDao != null)
+                                {
+                                    var seqNo = undone.SeqNo;
                                     Task.Run(() =>
                                     {
                                         try { _drawActionDao.MarkUndone(client.CurrentRoomId, seqNo); }
                                         catch (Exception ex) { Console.WriteLine($"  [DB] MarkUndone failed: {ex.Message}"); }
                                     });
+                                }
 
-                                await _roomManager.BroadcastAsync(client.CurrentRoomId, msg, client);
+                                // Sender already applied the undo optimistically; only peers need the notification.
+                                var undoMsg = new Message(MessageType.DRAW_UNDO,
+                                    new UndoNotification { ActionId = undone.ActionId });
+                                await _roomManager.BroadcastAsync(client.CurrentRoomId, undoMsg, client);
+                                await PublishToPeersAsync(client.CurrentRoomId, undoMsg);
                             }
                         }
                         break;
@@ -292,6 +532,7 @@ namespace CanvasApp.Server
                         {
                             _roomManager.ClearCanvas(client.CurrentRoomId);
                             await _roomManager.BroadcastAsync(client.CurrentRoomId, msg);
+                            await PublishToPeersAsync(client.CurrentRoomId, msg);
                             _autoSave?.ForceSnapshot(client.CurrentRoomId);
                         }
                         break;
@@ -322,8 +563,28 @@ namespace CanvasApp.Server
                                 });
                             }
 
-                            await _roomManager.BroadcastAsync(client.CurrentRoomId,
-                                new Message(MessageType.CHAT_MESSAGE, chat));
+                            var chatMsg = new Message(MessageType.CHAT_MESSAGE, chat);
+                            await _roomManager.BroadcastAsync(client.CurrentRoomId, chatMsg);
+                            await PublishToPeersAsync(client.CurrentRoomId, chatMsg);
+                        }
+                        break;
+
+                    case MessageType.CHAT_FILE:
+                        if (!string.IsNullOrEmpty(client.CurrentRoomId))
+                        {
+                            var fileMsg = msg.GetData<ChatMessage>();
+                            if (fileMsg == null
+                                || string.IsNullOrWhiteSpace(fileMsg.FileName)
+                                || string.IsNullOrEmpty(fileMsg.FileData)) break;
+
+                            fileMsg.UserId = client.UserId;
+                            fileMsg.Username = client.Username;
+                            fileMsg.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+                            // Broadcast file to room; do not persist to DB
+                            var fileEnvelope = new Message(MessageType.CHAT_FILE, fileMsg);
+                            await _roomManager.BroadcastAsync(client.CurrentRoomId, fileEnvelope);
+                            await PublishToPeersAsync(client.CurrentRoomId, fileEnvelope);
                         }
                         break;
 
@@ -343,11 +604,20 @@ namespace CanvasApp.Server
         private static async Task HandleJoin(ConnectedClient client, JoinRoomRequest joinReq)
         {
             var joinRes = _roomManager.Join(joinReq, client);
+
+            // ✅ Add Canvas Server address to response so client can direct-connect after LB redirect
+            if (joinRes.Success)
+            {
+                joinRes.ServerHost = _serverHost;
+                joinRes.ServerPort = _serverPort;
+            }
+
+            // Step 1: Send immediate join result to client (includes local + peer members at join time)
             await client.SendAsync(new Message(MessageType.ROOM_JOIN_RESULT, joinRes));
 
             if (!joinRes.Success) return;
 
-            // Send chat history to the joining client
+            // Step 2: Send chat history to the joining client
             if (_chatDao != null)
             {
                 try
@@ -363,15 +633,19 @@ namespace CanvasApp.Server
                 }
             }
 
-            // Notify other clients in the room about the new member
-            await _roomManager.BroadcastAsync(joinRes.Room.Id,
-                new Message(MessageType.ROOM_UPDATE, new RoomMembersUpdate
-                {
-                    Members = _roomManager.GetMembers(joinRes.Room.Id),
-                    JoinedUsername = client.Username
-                }), sender: client);
+            // Step 3: Publish the new member to peer servers
+            await PublishLocalMembersAsync(joinRes.Room.Id);
 
-            // Notify lobby clients so user counts refresh
+            // Step 4: Notify OTHER clients in the room about the new member (exclude the joining client)
+            var joinUpdate = new Message(MessageType.ROOM_UPDATE, new RoomMembersUpdate
+            {
+                Members = _roomManager.GetMembers(joinRes.Room.Id),
+                JoinedUsername = client.Username
+            });
+            await _roomManager.BroadcastAsync(joinRes.Room.Id, joinUpdate, sender: client);
+            await PublishToPeersAsync(joinRes.Room.Id, joinUpdate);
+
+            // Step 5: Notify lobby clients so user counts refresh
             var lobbyMsg = new Message(MessageType.ROOM_LIST_RESULT,
                 new RoomListResult { Rooms = _roomManager.GetRoomList() });
             await _roomManager.BroadcastToLobbyAsync(lobbyMsg);

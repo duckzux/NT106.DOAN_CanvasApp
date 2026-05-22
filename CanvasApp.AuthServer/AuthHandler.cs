@@ -16,17 +16,21 @@ namespace CanvasApp.AuthServer
     {
         private readonly AuthService _authService;
         private readonly UserService _userService;
+        private readonly OtpService _otpService;
 
-        public AuthHandler(UserStore store)
+        public AuthHandler(UserStore store, OtpStore otpStore)
         {
+            var mailer = new SmtpEmailSender();
+            _otpService = new OtpService(otpStore, mailer);
             _authService = new AuthService(store);
-            _userService = new UserService(store);
+            _userService = new UserService(store, _otpService);
         }
 
         public async Task HandleClientAsync(TcpClient client)
         {
             var endpoint = client.Client.RemoteEndPoint?.ToString() ?? "?";
-            Console.WriteLine($"[+] Auth connect {endpoint}");
+            // Silent probes (LB health check: connect + close, 0 bytes) stay un-logged.
+            bool gotData = false;
             try
             {
                 using (var stream = client.GetStream())
@@ -36,6 +40,11 @@ namespace CanvasApp.AuthServer
                     string line;
                     while ((line = await reader.ReadLineAsync()) != null)
                     {
+                        if (!gotData)
+                        {
+                            gotData = true;
+                            Console.WriteLine($"[+] Auth connect {endpoint}");
+                        }
                         var response = ProcessMessage(line);
                         if (response != null)
                             await writer.WriteLineAsync(response.ToJson());
@@ -44,12 +53,14 @@ namespace CanvasApp.AuthServer
             }
             catch (Exception ex) when (!(ex is OperationCanceledException))
             {
-                Console.WriteLine($"[!] {endpoint}: {ex.Message}");
+                if (gotData)
+                    Console.WriteLine($"[!] {endpoint}: {ex.Message}");
             }
             finally
             {
                 client.Close();
-                Console.WriteLine($"[-] Auth disconnect {endpoint}");
+                if (gotData)
+                    Console.WriteLine($"[-] Auth disconnect {endpoint}");
             }
         }
 
@@ -65,6 +76,15 @@ namespace CanvasApp.AuthServer
 
                     case MessageType.AUTH_REGISTER:
                         return _userService.Register(msg.GetData<RegisterRequest>());
+
+                    case MessageType.AUTH_SEND_OTP:
+                        return _otpService.SendOtp(msg.GetData<SendOtpRequest>());
+
+                    case MessageType.AUTH_FORGOT_SEND_OTP:
+                        return _userService.SendForgotPasswordOtp(msg.GetData<ForgotPasswordSendOtpRequest>());
+
+                    case MessageType.AUTH_RESET_PASSWORD:
+                        return _userService.ResetPassword(msg.GetData<ResetPasswordRequest>());
 
                     case MessageType.PING:
                         return new Message(MessageType.PONG);

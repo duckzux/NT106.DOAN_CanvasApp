@@ -66,9 +66,57 @@ namespace CanvasApp.Common
         public string Username { get; set; }
         public string Password { get; set; }
         public string Email { get; set; }
+        // Email-OTP gate: client must first obtain an OtpToken via AUTH_SEND_OTP
+        // and pass the matching 6-digit OtpCode back here. Server rejects the
+        // request if either is missing or invalid.
+        public string OtpToken { get; set; }
+        public string OtpCode { get; set; }
     }
 
     public class RegisterResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+    }
+
+    public class SendOtpRequest
+    {
+        public string Username { get; set; }
+        public string Email { get; set; }
+    }
+
+    public class SendOtpResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+        public string OtpToken { get; set; }
+        public int ExpiresInSeconds { get; set; }
+    }
+
+    // ── Forgot-password: client supplies only the email; server looks up the
+    // user, generates an OTP bound to that account, and emails the code.
+    public class ForgotPasswordSendOtpRequest
+    {
+        public string Email { get; set; }
+    }
+
+    public class ForgotPasswordSendOtpResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+        public string OtpToken { get; set; }
+        public int ExpiresInSeconds { get; set; }
+    }
+
+    public class ResetPasswordRequest
+    {
+        public string Email { get; set; }
+        public string NewPassword { get; set; }
+        public string OtpToken { get; set; }
+        public string OtpCode { get; set; }
+    }
+
+    public class ResetPasswordResult
     {
         public bool Success { get; set; }
         public string Message { get; set; }
@@ -100,12 +148,44 @@ namespace CanvasApp.Common
         public string SnapshotData { get; set; }
         public List<DrawAction> CanvasState { get; set; } = new List<DrawAction>();
         public List<RoomMember> Members { get; set; } = new List<RoomMember>();
+
+        // ✅ Canvas Server addresses (returned by LoadBalancer to direct client connection)
+        public string ServerHost { get; set; }
+        public int ServerPort { get; set; }
+    }
+
+    public class ResolveRoomRequest
+    {
+        public string RoomId { get; set; }
+        public string Password { get; set; }
+    }
+
+    public class ResolveRoomResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+        public bool RequiresPassword { get; set; }
+        public string ServerHost { get; set; }
+        public int ServerPort { get; set; }
     }
 
     public class InviteCodeRequest
     {
         public string InviteCode { get; set; }
         public string Password { get; set; }
+        public string RoomId { get; set; }  // Resolved roomId for LoadBalancer affinity routing
+    }
+
+    public class ResolveInviteCodeRequest
+    {
+        public string InviteCode { get; set; }
+    }
+
+    public class ResolveInviteCodeResult
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+        public string RoomId { get; set; }
     }
 
     public class ChatHistoryResult
@@ -129,11 +209,19 @@ namespace CanvasApp.Common
         [JsonProperty("text")] public string Text { get; set; }
         [JsonProperty("filled")] public bool Filled { get; set; }
         [JsonProperty("timestamp")] public long Timestamp { get; set; }
+        // Client-generated stable identifier for cross-client undo/redo lookup.
+        [JsonProperty("actionId")] public string ActionId { get; set; }
 
         // DB-only metadata — not sent to clients
         [JsonIgnore] public string RoomId { get; set; }
         [JsonIgnore] public long SeqNo { get; set; }
         [JsonIgnore] public bool IsUndone { get; set; }
+    }
+
+    // Payload broadcast when an action is undone — identifies which action to remove.
+    public class UndoNotification
+    {
+        [JsonProperty("actionId")] public string ActionId { get; set; }
     }
 
     // ── Canvas snapshot ──────────────────────────────────────────────
@@ -162,5 +250,17 @@ namespace CanvasApp.Common
         [JsonProperty("username")] public string Username { get; set; }
         [JsonProperty("text")] public string Text { get; set; }
         [JsonProperty("timestamp")] public long Timestamp { get; set; }
+        // File attachment fields (null for regular text messages)
+        [JsonProperty("fileName")] public string FileName { get; set; }
+        [JsonProperty("fileData")] public string FileData { get; set; }
+        [JsonProperty("fileSizeBytes")] public long FileSizeBytes { get; set; }
+    }
+
+    // ── Peer mesh payload for canvas state sync after reconnect ──
+    public class PeerCanvasSyncPayload
+    {
+        [JsonProperty("roomId")] public string RoomId { get; set; }
+        [JsonProperty("serverId")] public string OriginServerId { get; set; }
+        [JsonProperty("actions")] public List<DrawAction> Actions { get; set; } = new List<DrawAction>();
     }
 }

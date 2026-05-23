@@ -583,6 +583,8 @@ namespace CanvasApp.Server
                     case MessageType.DRAW_END:
                     case MessageType.DRAW_SHAPE:
                     case MessageType.DRAW_TEXT:
+                    case MessageType.DRAW_IMAGE:
+                    case MessageType.DRAW_IMAGE_TRANSFORM:
                         if (!string.IsNullOrEmpty(client.CurrentRoomId))
                         {
                             if (msg.Type != MessageType.DRAW_START && msg.Type != MessageType.DRAW_MOVE)

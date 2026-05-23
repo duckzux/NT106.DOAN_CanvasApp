@@ -89,6 +89,10 @@ namespace CanvasApp.Common
         public const string DRAW_CLEAR = "DRAW_CLEAR";
         public const string DRAW_UNDO = "DRAW_UNDO";
         public const string DRAW_FILL = "DRAW_FILL";
+        // Place an image on the canvas. Payload: DrawAction with Type="image", ActionId, Points=[topLeft, bottomRight], ImageData=base64.
+        public const string DRAW_IMAGE = "DRAW_IMAGE";
+        // Update an existing image's position/size. Payload: DrawAction with ActionId, Points=[topLeft, bottomRight]. ImageData omitted.
+        public const string DRAW_IMAGE_TRANSFORM = "DRAW_IMAGE_TRANSFORM";
 
         // Canvas state sync
         public const string CANVAS_STATE = "CANVAS_STATE";

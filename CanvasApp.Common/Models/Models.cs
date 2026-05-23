@@ -249,6 +249,9 @@ namespace CanvasApp.Common
         [JsonProperty("timestamp")] public long Timestamp { get; set; }
         // Client-generated stable identifier for cross-client undo/redo lookup.
         [JsonProperty("actionId")] public string ActionId { get; set; }
+        // Base64-encoded image bytes; only set for "image" CREATE actions, omitted on transforms.
+        [JsonProperty("imageData", NullValueHandling = NullValueHandling.Ignore)]
+        public string ImageData { get; set; }
 
         // DB-only metadata — not sent to clients
         [JsonIgnore] public string RoomId { get; set; }

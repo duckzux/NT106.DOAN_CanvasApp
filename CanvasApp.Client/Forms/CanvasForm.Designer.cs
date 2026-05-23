@@ -712,9 +712,10 @@ namespace CanvasApp.Client
             // btnImportBg
             // 
             this.btnImportBg.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Image;
+            this.btnImportBg.Image = null; // loaded at runtime from embedded resource in CanvasForm.cs
             this.btnImportBg.ImageTransparentColor = System.Drawing.Color.Magenta;
             this.btnImportBg.Name = "btnImportBg";
-            this.btnImportBg.Size = new System.Drawing.Size(43, 4);
+            this.btnImportBg.Size = new System.Drawing.Size(43, 28);
             this.btnImportBg.Text = "toolStripButton1";
             // 
             // colorDialog1

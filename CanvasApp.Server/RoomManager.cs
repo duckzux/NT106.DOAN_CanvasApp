@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using CanvasApp.Common;
 using CanvasApp.Common.DataAccess;
+using Newtonsoft.Json;
 
 namespace CanvasApp.Server
 {
@@ -68,6 +69,17 @@ namespace CanvasApp.Server
         // Compressed snapshot cache per room (avoids keeping full action list in RAM)
         private readonly ConcurrentDictionary<string, string> _snapshotCache
             = new ConcurrentDictionary<string, string>();
+
+        // ActionIds undone since the last snapshot. AutoSaveService trims _canvasState
+        // after each snapshot, so older actions only live inside _snapshotCache — undoing
+        // one of them no longer matches _canvasState. Tracking the ActionIds here lets us
+        // (1) broadcast DRAW_UNDO to peers even when the action is already trimmed,
+        // (2) filter the cached snapshot at join time so new joiners don't see it, and
+        // (3) drop it from the next snapshot baseline. The set is cleared once a new
+        // snapshot is persisted (the new baseline already reflects every undo applied
+        // before it was taken).
+        private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _undoneSinceSnapshot
+            = new ConcurrentDictionary<string, ConcurrentDictionary<string, byte>>();
 
         // Timestamp when a room became empty (for idle-room cleanup)
         private readonly ConcurrentDictionary<string, DateTime> _lastEmptyTime
@@ -343,6 +355,7 @@ namespace CanvasApp.Server
             _roomStates.TryRemove(roomId, out _);
             _canvasLoaded.TryRemove(roomId, out _);
             _snapshotCache.TryRemove(roomId, out _);
+            _undoneSinceSnapshot.TryRemove(roomId, out _);
             _lastEmptyTime.TryRemove(roomId, out _);
             _undoStacks.TryRemove(roomId, out _);
             if (!string.IsNullOrEmpty(room.InviteCode))
@@ -597,6 +610,16 @@ namespace CanvasApp.Server
             // race with anything mutating it.
             _snapshotCache.TryGetValue(room.Id, out var snapshotData);
 
+            // Strip undone actions out of the cached baseline before handing it to the joiner.
+            // Without this, an action that was undone after the most recent snapshot would still
+            // appear on the new client's canvas — the undo never reaches them because they never
+            // had it in live history to begin with.
+            snapshotData = FilterSnapshotForUndone(room.Id, snapshotData);
+            // Same filter for the post-snapshot deltas (rare: an action could be added to state
+            // and then trimmed-then-undone in tight sequence on a misbehaving client; cheap to apply).
+            if (_undoneSinceSnapshot.TryGetValue(room.Id, out var undoneSet) && undoneSet.Count > 0)
+                deltas = deltas.Where(a => string.IsNullOrEmpty(a.ActionId) || !undoneSet.ContainsKey(a.ActionId)).ToList();
+
             return new JoinRoomResult
             {
                 Success = true,
@@ -607,6 +630,30 @@ namespace CanvasApp.Server
                 Members = GetMembers(room.Id),
                 ChatHistory = historySnapshot ?? new List<ChatMessage>()
             };
+        }
+
+        // Removes ActionIds in _undoneSinceSnapshot[roomId] from the compressed snapshot
+        // baseline and re-compresses it. Returns the original string when there's nothing
+        // to filter, no cached set, or decompression fails (fail-open so a corrupt
+        // snapshot can't lock out the room).
+        private string FilterSnapshotForUndone(string roomId, string snapshotData)
+        {
+            if (string.IsNullOrEmpty(snapshotData)) return snapshotData;
+            if (!_undoneSinceSnapshot.TryGetValue(roomId, out var undoneSet) || undoneSet.Count == 0)
+                return snapshotData;
+            try
+            {
+                var baseline = SnapshotHelper.Decompress(snapshotData);
+                int before = baseline.Count;
+                baseline.RemoveAll(a => !string.IsNullOrEmpty(a.ActionId) && undoneSet.ContainsKey(a.ActionId));
+                if (baseline.Count == before) return snapshotData;
+                return SnapshotHelper.Compress(JsonConvert.SerializeObject(baseline));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  [Room] FilterSnapshotForUndone({roomId}) failed: {ex.Message}");
+                return snapshotData;
+            }
         }
 
         // ── Leave ─────────────────────────────────────────────────────
@@ -893,21 +940,38 @@ namespace CanvasApp.Server
             return (seqNo, actionId);
         }
 
-        // Removes a single action by ActionId (used by text-edit / targeted delete).
-        // Returns (seqNo, actionId) of the removed action, or (-1, null) if not found.
+        // Removes a single action by ActionId (used by text-edit / targeted delete and the
+        // regular client undo button). Returns (seqNo, actionId) when the action lives in
+        // _canvasState, and (-1, actionId) when it has already been trimmed out by a
+        // snapshot — the caller still wants to broadcast DRAW_UNDO in that case because
+        // peers hold the action in their local _history and snapshot baselines on disk
+        // still reference it. Returns (-1, null) only when no actionId was supplied.
         public (long SeqNo, string ActionId) UndoActionById(string roomId, string actionId)
         {
             if (string.IsNullOrEmpty(actionId)) return (-1, null);
-            if (!_canvasState.TryGetValue(roomId, out var state)) return (-1, null);
 
             long seqNo = -1;
-            lock (state)
+            if (_canvasState.TryGetValue(roomId, out var state))
             {
-                var found = state.FirstOrDefault(a => a.ActionId == actionId);
-                if (found == null) return (-1, null);
-                seqNo = found.SeqNo;
-                state.RemoveAll(a => a.ActionId == actionId);
+                lock (state)
+                {
+                    var found = state.FirstOrDefault(a => a.ActionId == actionId);
+                    if (found != null)
+                    {
+                        seqNo = found.SeqNo;
+                        state.RemoveAll(a => a.ActionId == actionId);
+                    }
+                }
             }
+
+            // Always track the ActionId so the next snapshot drops it and new joiners
+            // don't see the undone action in the cached baseline. We do this even when
+            // the action was just removed from _canvasState because _snapshotCache may
+            // still contain a prior copy (e.g. the action was carried forward from an
+            // earlier snapshot generation that was never re-taken).
+            var set = _undoneSinceSnapshot.GetOrAdd(roomId, _ => new ConcurrentDictionary<string, byte>());
+            set.TryAdd(actionId, 0);
+
             // Stale SeqNo may linger in _undoStacks; UndoLastAction silently skips missing entries.
             return (seqNo, actionId);
         }
@@ -919,6 +983,7 @@ namespace CanvasApp.Server
 
             // Also clear the snapshot cache so new joiners get an empty canvas
             _snapshotCache.TryRemove(roomId, out _);
+            _undoneSinceSnapshot.TryRemove(roomId, out _);
 
             if (_roomStates.TryGetValue(roomId, out var rs))
                 Interlocked.Exchange(ref rs.DirtyActionCount, 0);
@@ -978,14 +1043,23 @@ namespace CanvasApp.Server
                 Interlocked.Exchange(ref rs.DirtyActionCount, 0);
             }
 
+            // Drop anything undone since the last snapshot. Without this, the next baseline
+            // would re-include actions that the user already removed via undo — they'd
+            // resurface on the next join.
+            if (_undoneSinceSnapshot.TryGetValue(roomId, out var undoneSet) && undoneSet.Count > 0)
+                copy.RemoveAll(a => !string.IsNullOrEmpty(a.ActionId) && undoneSet.ContainsKey(a.ActionId));
+
             return (copy, lastSeq, version);
         }
 
         // Called by AutoSaveService after the new snapshot is persisted to DB.
         // Updates the in-memory cache so new joiners get the fresh compressed baseline.
+        // Also clears the post-snapshot undone-set: the new baseline already excludes those
+        // ActionIds (PrepareSnapshot filtered them), so they no longer need filtering on join.
         public void SetSnapshotCache(string roomId, string compressedData)
         {
             _snapshotCache[roomId] = compressedData;
+            _undoneSinceSnapshot.TryRemove(roomId, out _);
         }
 
         // Trims _canvasState to only keep actions with SeqNo > upToSeq.
@@ -1021,6 +1095,7 @@ namespace CanvasApp.Server
             _roomStates.TryRemove(roomId, out _);
             _canvasLoaded.TryRemove(roomId, out _);
             _snapshotCache.TryRemove(roomId, out _);
+            _undoneSinceSnapshot.TryRemove(roomId, out _);
             _lastEmptyTime.TryRemove(roomId, out _);
 
             foreach (var key in _undoStacks.Keys.Where(k => k.StartsWith(roomId + ":")).ToList())
@@ -1155,8 +1230,15 @@ namespace CanvasApp.Server
                 case MessageType.DRAW_UNDO:
                 {
                     var notif = inner.GetData<UndoNotification>();
-                    if (notif != null && loaded && _canvasState.TryGetValue(roomId, out var state))
-                        lock (state) { state.RemoveAll(a => a.ActionId == notif.ActionId); }
+                    if (notif != null && !string.IsNullOrEmpty(notif.ActionId))
+                    {
+                        if (loaded && _canvasState.TryGetValue(roomId, out var state))
+                            lock (state) { state.RemoveAll(a => a.ActionId == notif.ActionId); }
+                        // Track even when the action is missing from _canvasState — the peer may
+                        // have undone an action that's still in this server's cached snapshot.
+                        var set = _undoneSinceSnapshot.GetOrAdd(roomId, _ => new ConcurrentDictionary<string, byte>());
+                        set.TryAdd(notif.ActionId, 0);
+                    }
                     break;
                 }
 

@@ -40,16 +40,19 @@ Quản lý kết nối:
 
 ProcessAsync là trung tâm xử lý App Logic. Trình tự:
 
-1. **Kiểm tra payload size** (anti-abuse).
-2. **Verify token** (trừ PING).
+1. **Kiểm tra payload size** (anti-abuse, ~4MB cap).
+2. **Verify token HMAC-SHA256** (trừ PING). Token format `base64(payload).base64(HMAC(payload, secret))`. So sánh MAC bằng `FixedTimeEquals` để không leak timing.
 3. **Switch msg.Type** xử lý từng loại message.
 
 Các nhóm chính:
 
-* **ROOM_***: list, create, join, resolve, delete, update password.
-* **DRAW_***: start, move, end, shape, text, fill, undo, clear.
-* **CHAT_***: message, file.
+* **ROOM_***: list, create, resolve (routing-only pre-join), join, leave, delete, update password.
+* **DRAW_***: start, move, end, shape, text, fill, undo, clear, image, image_transform.
+* **CHAT_***: message, file. (CHAT_HISTORY giờ embedded trong ROOM_JOIN_RESULT).
+* **CANVAS_STATE**: re-sync full snapshot + deltas on demand.
 * **PING/PONG**: keepalive.
+
+Mọi event sau khi xử lý local còn được `PEER_RELAY` sang các canvas server khác để đồng bộ multi-server.
 
 ### 2.4. RoomManager: logic domain
 
@@ -78,9 +81,9 @@ Nhóm chức năng quan trọng:
 
 LobbyClient mở socket đến LB cho các request 1 lần, sau đó đóng ngay.
 
-* Dùng cho ROOM_LIST, ROOM_CREATE, ROOM_RESOLVE, ROOM_DELETE, ROOM_UPDATE_PASSWORD.
-* Mục tiêu: LB có thể route theo room-affinity cho từng request.
-* Tránh sử dụng 1 socket cho nhiều request để không bị pin vào sai Canvas Server.
+* Dùng cho ROOM_LIST, ROOM_CREATE, ROOM_RESOLVE, RESOLVE_INVITE_CODE, ROOM_DELETE, ROOM_UPDATE_PASSWORD.
+* Mục tiêu: LB peek message **đầu tiên** trên mỗi socket để route. Nếu dùng 1 socket cho nhiều request thì chỉ message đầu được route đúng, các message sau ride pipe sai.
+* `ROOM_RESOLVE` chỉ trả về `ServerHost`/`ServerPort` (không admit user) → sau khi đóng socket LB, client trực tiếp connect tới canvas server đúng và gửi `ROOM_JOIN` **một lần duy nhất** trên socket persistent.
 
 ### 3.2. CanvasClient: socket persistent
 
@@ -138,13 +141,16 @@ Dấu hiệu log cho demo:
 3. Server tạo room, lưu DB, log [Room] Created ....
 4. Client nhận ROOM_CREATE_RESULT và đóng socket.
 
-### 5.2. Join phòng (ROOM_JOIN)
+### 5.2. Join phòng (ROOM_RESOLVE → connect → ROOM_JOIN)
 
 1. Client đã có token.
-2. Client gọi CanvasClient.JoinRoomAsync (socket persistent).
-3. Server check password, load snapshot, add member.
-4. Server trả ROOM_JOIN_RESULT bao gồm: room info, canvas snapshot, members.
-5. Server broadcast ROOM_UPDATE cho các user khác.
+2. Client gọi LobbyClient.ResolveRoomAsync (socket ngắn hạn qua LB).
+3. LB route sticky theo RoomId → canvas server đúng. Server check password (under `lock(room)`), trả `ROOM_RESOLVE_RESULT { ServerHost, ServerPort, RequiresPassword }`. **KHÔNG** add user vào `_roomClients`.
+4. LB socket đóng.
+5. Client mở socket persistent đến `ServerHost:ServerPort` (CanvasClient.ConnectToServerAsync).
+6. Client gửi `ROOM_JOIN` **một lần** trên socket persistent.
+7. Server fetch chat history snapshot **trước** khi admit (tránh race history vs live), add member, load canvas state, trả `ROOM_JOIN_RESULT { Room, Members, SnapshotData, CanvasState, ChatHistory }`.
+8. Server broadcast `ROOM_UPDATE` cho các user khác, publish `PEER_RELAY(ROOM_UPDATE)` sang các peer.
 
 ---
 
@@ -152,10 +158,12 @@ Dấu hiệu log cho demo:
 
 LB đọc thông điệp đầu tiên để route:
 
-* **AUTH_*** -> Auth pool.
-* **ROOM_***, **DRAW_***, **CHAT_*** -> Canvas pool.
+* **AUTH_*** (LOGIN/REGISTER/SEND_OTP/FORGOT_SEND_OTP/RESET_PASSWORD) -> Auth pool, round-robin.
+* **ROOM_JOIN**, **ROOM_RESOLVE**, **ROOM_JOIN_BY_CODE (w/ RoomId)** -> Canvas pool, sticky route theo RoomId (`RouteForRoom`). Bind vào table nếu chưa có.
+* **ROOM_DELETE**, **ROOM_UPDATE_PASSWORD** -> Canvas pool, `RouteForRoomReadOnly` (sticky nếu đã bind, nếu không thì least-loaded; **không** tạo binding mới — metadata operation).
+* **default** (ROOM_LIST, RESOLVE_INVITE_CODE, DRAW_*, CHAT_*) -> Canvas pool, least-loaded.
 
-Room-affinity được dùng ở các thao tác room (ROOM_RESOLVE / ROOM_JOIN) để client trong cùng phòng luôn tới đúng Canvas Server.
+LB còn intercept `ROOM_CREATE_RESULT` để pre-register binding cho server vừa tạo room, và intercept `ROOM_DELETE_RESULT` (Success=true) để `UnregisterRoom` (giảm RoomCount).
 
 ---
 
@@ -182,14 +190,17 @@ Room-affinity được dùng ở các thao tác room (ROOM_RESOLVE / ROOM_JOIN) 
 
 ## 9. File liên quan cần mở khi demo
 
-* Accept loop: [CanvasApp.Server/Program.cs](CanvasApp.Server/Program.cs#L165-L171)
-* Client handler: [CanvasApp.Server/Program.cs](CanvasApp.Server/Program.cs#L248-L315)
-* Message dispatcher: [CanvasApp.Server/Program.cs](CanvasApp.Server/Program.cs#L317-L420)
-* Room create/join/leave: [CanvasApp.Server/RoomManager.cs](CanvasApp.Server/RoomManager.cs#L237-L636)
-* Broadcast + record action: [CanvasApp.Server/RoomManager.cs](CanvasApp.Server/RoomManager.cs#L718-L772)
-* Client send/receive: [CanvasApp.Client/Network/CanvasClient.cs](CanvasApp.Client/Network/CanvasClient.cs#L124-L200)
-* Lobby short-lived socket: [CanvasApp.Client/Network/LobbyClient.cs](CanvasApp.Client/Network/LobbyClient.cs#L73-L114)
-* Auth login socket: [CanvasApp.Client/Network/AuthClient.cs](CanvasApp.Client/Network/AuthClient.cs#L16-L48)
+* Accept loop + main: [CanvasApp.Server/Program.cs:38-179](../../CanvasApp.Server/Program.cs#L38-L179)
+* Per-client handler (HandleClient): [CanvasApp.Server/Program.cs:285-352](../../CanvasApp.Server/Program.cs#L285-L352)
+* Message dispatcher (ProcessAsync): [CanvasApp.Server/Program.cs:354-728](../../CanvasApp.Server/Program.cs#L354-L728)
+* RoomManager — Create/Resolve/Join/Leave/Broadcast: [CanvasApp.Server/RoomManager.cs:237-770](../../CanvasApp.Server/RoomManager.cs#L237-L770)
+* RoomManager — RecordDrawAction + persistence: [CanvasApp.Server/RoomManager.cs:852](../../CanvasApp.Server/RoomManager.cs#L852)
+* Client persistent socket: [CanvasApp.Client/Network/CanvasClient.cs](../../CanvasApp.Client/Network/CanvasClient.cs)
+* Lobby short-lived socket: [CanvasApp.Client/Network/LobbyClient.cs](../../CanvasApp.Client/Network/LobbyClient.cs)
+* Auth short-lived socket: [CanvasApp.Client/Network/AuthClient.cs](../../CanvasApp.Client/Network/AuthClient.cs)
+* LoadBalancer routing: [CanvasApp.LoadBalancer/LoadBalancer.cs:242-480](../../CanvasApp.LoadBalancer/LoadBalancer.cs#L242-L480)
+* PeerManager (outbound mesh): [CanvasApp.Server/PeerManager.cs](../../CanvasApp.Server/PeerManager.cs)
+* PeerHandler (inbound mesh): [CanvasApp.Server/PeerHandler.cs](../../CanvasApp.Server/PeerHandler.cs)
 
 ---
 

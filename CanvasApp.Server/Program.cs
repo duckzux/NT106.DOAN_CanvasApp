@@ -635,12 +635,20 @@ namespace CanvasApp.Server
                                 undone = _roomManager.UndoActionById(client.CurrentRoomId, requestedNotif.ActionId);
                             else
                                 undone = _roomManager.UndoLastAction(client.CurrentRoomId, client.UserId);
-                            if (undone.SeqNo > 0)
+                            // Broadcast whenever we have an ActionId, even if the action was already
+                            // trimmed out of _canvasState by a snapshot (SeqNo will be -1 then).
+                            // Peers still hold the action in their local _history and need DRAW_UNDO
+                            // to remove it; RoomManager has recorded the ActionId in
+                            // _undoneSinceSnapshot so it's stripped from the cached baseline on
+                            // subsequent joins. Skipping the broadcast here was the multi-client
+                            // undo-not-propagating bug: any action older than the 60-second snapshot
+                            // tick stayed visible on peers.
+                            if (!string.IsNullOrEmpty(undone.ActionId))
                             {
-                                if (_drawActionDao != null)
+                                if (_drawActionDao != null && undone.SeqNo > 0)
                                 {
                                     var seqNo = undone.SeqNo;
-                                    Task.Run(() =>
+                                    _ = Task.Run(() =>
                                     {
                                         try { _drawActionDao.MarkUndone(client.CurrentRoomId, seqNo); }
                                         catch (Exception ex) { Console.WriteLine($"  [DB] MarkUndone failed: {ex.Message}"); }

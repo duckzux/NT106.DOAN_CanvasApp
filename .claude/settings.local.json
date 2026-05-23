@@ -4,7 +4,14 @@
       "Bash(dir /b)",
       "PowerShell(Get-Process CanvasApp.Client,CanvasApp.Server,CanvasApp.AuthServer,CanvasApp.LoadBalancer -ErrorAction SilentlyContinue)",
       "PowerShell(Stop-Process -Force)",
-      "PowerShell(\"stopped\")"
+      "PowerShell(\"stopped\")",
+      "Bash(rm \"h:/[TL]KI4/T3_LTMCB/DOAN/CanvasApp/Docs/DEMO_RUBRIC.md\")",
+      "PowerShell(Get-Command msbuild,dotnet -ErrorAction SilentlyContinue)",
+      "PowerShell($paths = @\\(\"$env:ProgramFiles\\\\Microsoft Visual Studio\\\\2022\",\"$env:ProgramFiles \\(x86\\)\\\\Microsoft Visual Studio\\\\2022\",\"$env:ProgramFiles\\\\dotnet\",\"$env:ProgramFiles \\(x86\\)\\\\dotnet\"\\); foreach \\($p in $paths\\) { if \\(Test-Path $p\\) { Get-ChildItem $p -Recurse -Filter \"msbuild.exe\" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 2 } })",
+      "PowerShell(& \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"h:\\\\[TL]KI4\\\\T3_LTMCB\\\\DOAN\\\\CanvasApp\\\\CanvasApp.sln\" /t:Build /p:Configuration=Debug /v:minimal /m /nologo 2>&1)"
+    ],
+    "additionalDirectories": [
+      "h:\\[TL]KI4\\T3_LTMCB\\DOAN\\CanvasApp\\Docs"
     ]
   }
 }

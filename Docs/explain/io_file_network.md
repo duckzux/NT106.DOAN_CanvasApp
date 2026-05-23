@@ -42,6 +42,19 @@ CanvasApp có 2 nhóm I/O chính:
 
 **Note:** File đọc trên máy local, không qua network.
 
+### 2.2b. Import ảnh thành overlay sync mọi client (DRAW_IMAGE)
+
+**Mục đích:** đặt 1 ảnh lên canvas, di chuyển/scale được, đồng bộ tới mọi client trong phòng.
+
+**Luồng hoạt động:**
+
+1. `OpenFileDialog` chọn ảnh.
+2. Đọc bytes → encode Base64.
+3. Gửi `DRAW_IMAGE` với `{ actionId, points: [topLeft, bottomRight], imageData }`.
+4. Server persist (như các action commit khác) → broadcast + PEER_RELAY.
+5. Khi user kéo/scale → client gửi `DRAW_IMAGE_TRANSFORM` (chỉ `actionId` + `points`, **không** `imageData`); server **mutate** action hiện có thay vì insert mới — tiết kiệm DB.
+6. Implementation ở partial `CanvasForm.Images.cs`.
+
 ### 2.3. Export canvas ra PNG/JPEG (Client)
 
 **Mục đích:** lưu canvas hiện tại ra file để nộp bài hoặc chia sẻ.
@@ -94,7 +107,7 @@ Cần lưu ý:
 
 **Mục đích:** query 1 lần từ client -> LB -> Canvas server.
 
-Đối tượng: `ROOM_LIST`, `ROOM_CREATE`, `ROOM_RESOLVE`, `ROOM_DELETE`.
+Đối tượng: `ROOM_LIST`, `ROOM_CREATE`, `ROOM_RESOLVE`, `RESOLVE_INVITE_CODE`, `ROOM_DELETE`, `ROOM_UPDATE_PASSWORD`.
 
 **Luồng hoạt động:**
 
@@ -103,7 +116,7 @@ Cần lưu ý:
 3. Đọc response (terminal type).
 4. Đóng socket.
 
-Lý do: LB cần route theo room-affinity, nên mỗi request sử dụng socket riêng.
+Lý do: LB chỉ peek **message đầu** trên mỗi socket để quyết định route. Nếu reuse 1 socket cho nhiều request, message đầu route đúng, các message sau ride pipe sai (bug "first-message-pins-route", fix 2026-05-21).
 
 ### 3.3. Canvas socket (persistent)
 
@@ -159,13 +172,14 @@ flowchart LR
 
 ## 6. File cần mở khi demo
 
-* Load config: [CanvasApp.LoadBalancer/Program.cs](CanvasApp.LoadBalancer/Program.cs#L31-L55) và [LoadConfig](CanvasApp.LoadBalancer/Program.cs#L90-L101)
-* Import ảnh nền: [CanvasApp.Client/Forms/CanvasForm.cs](CanvasApp.Client/Forms/CanvasForm.cs#L133-L142)
-* Export PNG/JPEG: [CanvasApp.Client/Forms/CanvasForm.cs](CanvasApp.Client/Forms/CanvasForm.cs#L147-L188)
-* Gửi file chat: [CanvasApp.Client/Forms/CanvasForm.cs](CanvasApp.Client/Forms/CanvasForm.cs#L1225-L1239)
-* Nhận file chat: [CanvasApp.Client/Forms/CanvasForm.cs](CanvasApp.Client/Forms/CanvasForm.cs#L1143-L1156)
-* TCP send/recv: [CanvasApp.Client/Network/CanvasClient.cs](CanvasApp.Client/Network/CanvasClient.cs#L124-L218)
-* Lobby request ngắn hạn: [CanvasApp.Client/Network/LobbyClient.cs](CanvasApp.Client/Network/LobbyClient.cs#L73-L114)
+* Load config JSON: [CanvasApp.LoadBalancer/Program.cs](../../CanvasApp.LoadBalancer/Program.cs)
+* Import ảnh nền + overlay: [CanvasApp.Client/Forms/CanvasForm.cs](../../CanvasApp.Client/Forms/CanvasForm.cs) (handler) + [CanvasForm.Images.cs](../../CanvasApp.Client/Forms/CanvasForm.Images.cs) (partial)
+* Export PNG/JPEG: [CanvasApp.Client/Forms/CanvasForm.cs](../../CanvasApp.Client/Forms/CanvasForm.cs) (`btnExport.Click`)
+* Gửi file chat: [CanvasApp.Client/Forms/CanvasForm.cs](../../CanvasApp.Client/Forms/CanvasForm.cs) (`SendChat` async, OpenFileDialog block ~line 1294)
+* Nhận file chat: [CanvasApp.Client/Forms/CanvasForm.cs](../../CanvasApp.Client/Forms/CanvasForm.cs) (decode base64 vào `_chatFiles` ~line 1212; SaveFileDialog ~line 269)
+* TCP send/recv persistent: [CanvasApp.Client/Network/CanvasClient.cs](../../CanvasApp.Client/Network/CanvasClient.cs)
+* Lobby request ngắn hạn: [CanvasApp.Client/Network/LobbyClient.cs](../../CanvasApp.Client/Network/LobbyClient.cs)
+* AES module (opt-in encrypt cho `data`): [CanvasApp.Common/Utils/MessageCrypto.cs](../../CanvasApp.Common/Utils/MessageCrypto.cs), [AesHelper.cs](../../CanvasApp.Common/Utils/AesHelper.cs)
 
 ---
 

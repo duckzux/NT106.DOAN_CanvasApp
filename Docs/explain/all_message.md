@@ -4,9 +4,11 @@
 > ```json
 > { "type": "<MESSAGE_TYPE>", "data": { ... }, "token": "<authToken>|null" }
 > ```
-> - `type`: hằng số trong `MessageType` (file [Message.cs](../../CanvasApp.Common/Models/Message.cs))
+> - `type`: hằng số trong `MessageType` (file [Message.cs](../../CanvasApp.Common/Models/Message.cs)) — là nguồn duy nhất; file `MessageType.cs` cũ là stub rỗng, để cho khả năng tương thích build cũ.
 > - `data`: payload tuỳ theo `type` (đối tượng JSON)
-> - `token`: JWT-ish token (base64 của `userId:username:issuedAt`), bắt buộc với hầu hết request sau đăng nhập; `null` với AUTH_* và PING
+> - `token`: chuỗi `base64(payload).base64(HMAC-SHA256(payload, secret))` với `payload = "userId:username:issuedAt"`. Secret lấy từ env `CANVASAPP_JWT_SECRET` (fallback hardcoded dev). TTL 24h. Verify bằng `FixedTimeEquals` (constant-time MAC). Bắt buộc với hầu hết request sau đăng nhập; `null` với AUTH_*, PING, và peer-mesh.
+>
+> **Mã hoá payload (opt-in):** module AES-256-CBC + HMAC-SHA256 ở [`Utils/MessageCrypto.cs`](../../CanvasApp.Common/Utils/MessageCrypto.cs) wrap `data` thành `{ _enc: "base64(IV‖CT‖MAC)", _v: 1 }`. `type` + `token` giữ plaintext để LB peek route và AuthServer verify. Mặc định đang TẮT trên dây để demo dễ thấy JSON qua Wireshark.
 
 ---
 
@@ -386,6 +388,32 @@ Xóa toàn bộ canvas.
 
 ```json
 { "type": "DRAW_CLEAR", "data": null }
+```
+
+### `DRAW_IMAGE` — Client → Canvas Server → broadcast
+Đặt 1 ảnh bitmap lên canvas (import từ máy hoặc paste). `Points` là 2 điểm xác định bounding box (topLeft, bottomRight). `ImageData` là base64 của byte[] PNG/JPEG.
+
+```json
+{
+  "type": "DRAW_IMAGE",
+  "data": {
+    "type": "image",
+    "userId": 1,
+    "actionId": "cli-img-1",
+    "points": [{ "x": 100, "y": 100 }, { "x": 400, "y": 300 }],
+    "imageData": "iVBORw0KGgo..."
+  }
+}
+```
+
+### `DRAW_IMAGE_TRANSFORM` — Client → Canvas Server → broadcast
+Di chuyển/scale ảnh đã có. Server **mutate** action hiện có (theo `actionId`) thay vì insert mới. Payload **không có** `imageData` — chỉ cập nhật `points`.
+
+```json
+{
+  "type": "DRAW_IMAGE_TRANSFORM",
+  "data": { "userId": 1, "actionId": "cli-img-1", "points": [{ "x": 150, "y": 120 }, { "x": 500, "y": 380 }] }
+}
 ```
 
 ### `CANVAS_STATE` — Client → Canvas Server → trả về Client

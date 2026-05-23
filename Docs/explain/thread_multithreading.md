@@ -86,9 +86,20 @@ Mục đích:
 
 ### 4.2. HealthChecker (Load Balancer)
 
-* Timer mỗi 5s probe các backend.
-* Nếu fail 3 lần -> mark DOWN.
-* Khi server lên lại -> mark UP.
+* Timer mỗi 5s probe các backend (`TcpClient.ConnectAsync` + immediate close).
+* Nếu fail 3 lần liên tiếp -> mark DOWN, drop bất kỳ `_roomRouting` mapping nào trỏ tới server đó.
+* Khi server lên lại (1 success) -> reset FailCount, mark UP.
+* Mỗi 15s in `[POOL]` snapshot của toàn bộ pool.
+
+### 4.3. PeerManager heartbeat (Canvas Server)
+
+* Mỗi 15s gửi `PEER_PING` tới mỗi peer. Nếu không có `PEER_PONG` trong 30s thì coi connection half-open, đóng + exponential reconnect (500ms → 30s cap).
+* Khi reconnect thành công → `OnPeerReconnected` event → Program.cs publish `PEER_CANVAS_SYNC` cho mỗi room dirty để peer replay action đã miss.
+
+### 4.4. OTP cleanup (AuthServer)
+
+* Background task chạy `OtpStore.DeleteExpired(24h)` mỗi 30 phút.
+* Tránh table `email_otp_codes` grow unbounded.
 
 ---
 
@@ -105,14 +116,18 @@ Dùng cho:
 
 ### 5.2. Lock vùng nhạy cảm
 
-* lock(list) khi add/remove client.
-* lock(state) khi add/remove draw action.
-* SemaphoreSlim để serialize send (StreamWriter không thread-safe).
+* `lock(list)` khi add/remove client + `TryDeleteRoomIfEmpty` recheck under cùng lock — atomic delete vs concurrent join.
+* `lock(state)` khi add/remove draw action; `ApplyPeerCanvasSync` cũng dedupe+merge under cùng lock.
+* `lock(room)` khi đọc/ghi cặp `HasPassword`/`PasswordHash` (atomic write trong UpdateRoomPassword).
+* Per-room load-gate (`_canvasLoadLocks`) cho `EnsureCanvasLoaded` — đảm bảo joiner không đọc empty state khi load đang chạy.
+* `_deleting: ConcurrentDictionary<string, byte>` guard cho `Join` khi room đang bị xoá.
+* `ConnectedClient._sendLock` (SemaphoreSlim) serialize mọi `WriteLineAsync` đến client — `StreamWriter` không thread-safe, concurrent DRAW+CHAT broadcast trước đây interleave bytes → JSON malformed bên client.
 
 Mục tiêu:
 
-* Tránh race condition.
+* Tránh race condition (delete-vs-join, password-vs-verify, load-vs-read).
 * Tránh interleaving JSON khi send.
+* Tránh self-loop khi peer mesh: `ApplyFromPeerAsync` drop envelope nếu `OriginServerId == SelfServerId`.
 
 ---
 
@@ -165,15 +180,18 @@ Log LB hiện probe mỗi 5s, fail 3 lần thì DOWN.
 * Vì sao cần Timer? -> autosave và health check định kỳ.
 
 
-## 9. File can mo khi demo
+## 9. File cần mở khi demo
 
-- Accept loop + handler: [CanvasApp.Server/Program.cs](CanvasApp.Server/Program.cs#L165-L315)
-- Dispatcher: [CanvasApp.Server/Program.cs](CanvasApp.Server/Program.cs#L317-L420)
-- Thread-safe collections: [CanvasApp.Server/RoomManager.cs](CanvasApp.Server/RoomManager.cs#L43-L79)
-- Persistence queue: [CanvasApp.Common/DataAccess/PersistenceQueue.cs](CanvasApp.Common/DataAccess/PersistenceQueue.cs#L12-L108)
-- AutoSave timer: [CanvasApp.Server/AutoSaveService.cs](CanvasApp.Server/AutoSaveService.cs#L18-L94)
-- HealthChecker loop: [CanvasApp.LoadBalancer/HealthChecker.cs](CanvasApp.LoadBalancer/HealthChecker.cs#L27-L110)
-- Client receive/heartbeat/reconnect: [CanvasApp.Client/Network/CanvasClient.cs](CanvasApp.Client/Network/CanvasClient.cs#L145-L258)
+- Accept loop + handler: [CanvasApp.Server/Program.cs:38-352](../../CanvasApp.Server/Program.cs#L38-L352)
+- Dispatcher (ProcessAsync): [CanvasApp.Server/Program.cs:354-728](../../CanvasApp.Server/Program.cs#L354-L728)
+- Thread-safe collections + locks: [CanvasApp.Server/RoomManager.cs](../../CanvasApp.Server/RoomManager.cs)
+- Per-client send serialization: [CanvasApp.Server/BroadcastService.cs](../../CanvasApp.Server/BroadcastService.cs)
+- Persistence queue: [CanvasApp.Common/DataAccess/PersistenceQueue.cs](../../CanvasApp.Common/DataAccess/PersistenceQueue.cs)
+- AutoSave timer: [CanvasApp.Server/AutoSaveService.cs](../../CanvasApp.Server/AutoSaveService.cs)
+- Peer heartbeat + reconnect: [CanvasApp.Server/PeerManager.cs](../../CanvasApp.Server/PeerManager.cs)
+- HealthChecker loop (LB): [CanvasApp.LoadBalancer/HealthChecker.cs](../../CanvasApp.LoadBalancer/HealthChecker.cs)
+- Client receive/heartbeat/reconnect: [CanvasApp.Client/Network/CanvasClient.cs](../../CanvasApp.Client/Network/CanvasClient.cs)
+- OTP cleanup background task: [CanvasApp.AuthServer/Program.cs](../../CanvasApp.AuthServer/Program.cs)
 
 ---
 

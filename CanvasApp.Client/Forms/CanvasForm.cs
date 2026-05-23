@@ -201,11 +201,24 @@ namespace CanvasApp.Client
                 }
             };
 
-            // Shape tools (dev)
-            btnRectangle.Click += (s, e) => _currentTool = "rectangle";
-            btnCircle.Click += (s, e) => _currentTool = "circle";
+            // Shape tools — rectangle/circle/triangle merged into one dropdown on btnRectangle
+            // (matches the btnArrow pattern). btnLine stays as its own button.
+            var shapeMenu = new ContextMenuStrip();
+            shapeMenu.Items.Add("Hình chữ nhật", null, (s, e) => _currentTool = "rectangle");
+            shapeMenu.Items.Add("Hình tròn",     null, (s, e) => _currentTool = "circle");
+            shapeMenu.Items.Add("Hình tam giác", null, (s, e) => _currentTool = "triangle");
+            btnRectangle.Click += (s, e) =>
+            {
+                var screenPt = toolStrip1.PointToScreen(new Point(btnRectangle.Bounds.Right, btnRectangle.Bounds.Top));
+                shapeMenu.Show(screenPt);
+            };
+            btnRectangle.ToolTipText = "Hình chữ nhật / tròn / tam giác";
+
+            // Hide the now-redundant standalone buttons (kept declared in Designer.cs).
+            toolStrip1.Items.Remove(btnCircle);
+            toolStrip1.Items.Remove(btnTriangle);
+
             btnLine.Click += (s, e) => _currentTool = "line";
-            btnTriangle.Click += (s, e) => _currentTool = "triangle";
             btnText.Click += (s, e) => _currentTool = "text";
             chkFill.Click += (s, e) => _currentTool = "fill";
 
@@ -456,33 +469,24 @@ namespace CanvasApp.Client
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
-            System.Drawing.Drawing2D.GraphicsContainer container = g.BeginContainer();
-
             g.TranslateTransform(_panOffset.X, _panOffset.Y);
             g.ScaleTransform(_zoom, _zoom);
 
-            if (_bitmap != null)
-            {
-                g.DrawImage(_bitmap, 0, 0);
-            }
-
-            DrawBackgroundTemplate(e.Graphics);
+            DrawBackgroundTemplate(g);
 
             if (_bitmap != null)
             {
-                e.Graphics.DrawImage(_bitmap, -_canvasOffsetX, -_canvasOffsetY);
+                g.DrawImage(_bitmap, -_canvasOffsetX, -_canvasOffsetY);
             }
 
             // Imported images + selection handles overlay (CanvasForm.Images.cs).
-            RenderImagesAndHandles(e.Graphics);
+            RenderImagesAndHandles(g);
 
-            // Draw active shape (từ nhánh dev)
+            // Draw active shape preview during a shape-tool drag.
             if (_isDrawing && _currentStroke != null && IsShapeTool(_currentTool))
             {
                 DrawShape(g, _currentStroke.Type, _lastPoint, _currentPoint, _currentStroke.Color, _currentStroke.Thickness);
             }
-
-            g.EndContainer(container);
 
             // Inline text editing preview — no background, no border
             if (_textEditActive)

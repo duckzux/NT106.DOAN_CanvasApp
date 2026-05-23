@@ -94,6 +94,7 @@
     </Compile>
     <Compile Include="Forms\CanvasForm.Images.cs">
       <DependentUpon>CanvasForm.cs</DependentUpon>
+      <SubType>Form</SubType>
     </Compile>
     <Compile Include="Forms\CreateRoom.cs">
       <SubType>UserControl</SubType>

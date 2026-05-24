@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
 using CanvasApp.Common;
+using CanvasApp.Common.Utils;
 
 namespace CanvasApp.Client
 {
@@ -43,7 +44,7 @@ namespace CanvasApp.Client
                     {
                         var req = new Message(MessageType.AUTH_LOGIN,
                             new LoginRequest { Username = username, Password = password });
-                        await writer.WriteLineAsync(req.ToJson());
+                        await writer.WriteLineAsync(MessageCrypto.Serialize(req));
 
                         // Bounded read so a stalled Auth server doesn't hang the UI thread
                         // forever (the underlying socket has no read deadline by default).
@@ -53,7 +54,7 @@ namespace CanvasApp.Client
                         if (line.Length == 0)
                             return new LoginResult { Success = false, Message = "Server không trả lời" };
 
-                        var resMsg = Message.FromJson(line);
+                        var resMsg = MessageCrypto.Deserialize(line);
                         return resMsg.GetData<LoginResult>();
                     }
                 }
@@ -82,7 +83,7 @@ namespace CanvasApp.Client
                     {
                         var req = new Message(MessageType.AUTH_SEND_OTP,
                             new SendOtpRequest { Username = username, Email = email });
-                        await writer.WriteLineAsync(req.ToJson());
+                        await writer.WriteLineAsync(MessageCrypto.Serialize(req));
 
                         // SMTP send can take a few seconds — give the server room before giving up.
                         var readTask = reader.ReadLineAsync();
@@ -93,7 +94,7 @@ namespace CanvasApp.Client
                         if (string.IsNullOrEmpty(line))
                             return new SendOtpResult { Success = false, Message = "Server không trả lời" };
 
-                        var resMsg = Message.FromJson(line);
+                        var resMsg = MessageCrypto.Deserialize(line);
                         return resMsg.GetData<SendOtpResult>();
                     }
                 }
@@ -122,7 +123,7 @@ namespace CanvasApp.Client
                     {
                         var req = new Message(MessageType.AUTH_FORGOT_SEND_OTP,
                             new ForgotPasswordSendOtpRequest { Email = email });
-                        await writer.WriteLineAsync(req.ToJson());
+                        await writer.WriteLineAsync(MessageCrypto.Serialize(req));
 
                         // Same SMTP-slowness allowance as the registration OTP flow.
                         var readTask = reader.ReadLineAsync();
@@ -133,7 +134,7 @@ namespace CanvasApp.Client
                         if (string.IsNullOrEmpty(line))
                             return new ForgotPasswordSendOtpResult { Success = false, Message = "Server không trả lời" };
 
-                        var resMsg = Message.FromJson(line);
+                        var resMsg = MessageCrypto.Deserialize(line);
                         return resMsg.GetData<ForgotPasswordSendOtpResult>();
                     }
                 }
@@ -168,7 +169,7 @@ namespace CanvasApp.Client
                                 OtpToken = otpToken,
                                 OtpCode = otpCode,
                             });
-                        await writer.WriteLineAsync(req.ToJson());
+                        await writer.WriteLineAsync(MessageCrypto.Serialize(req));
 
                         var line = await ReadLineWithTimeoutAsync(reader, 10_000);
                         if (line == null)
@@ -176,7 +177,7 @@ namespace CanvasApp.Client
                         if (line.Length == 0)
                             return new ResetPasswordResult { Success = false, Message = "Server không trả lời" };
 
-                        var resMsg = Message.FromJson(line);
+                        var resMsg = MessageCrypto.Deserialize(line);
                         return resMsg.GetData<ResetPasswordResult>();
                     }
                 }
@@ -212,7 +213,7 @@ namespace CanvasApp.Client
                                 OtpToken = otpToken,
                                 OtpCode = otpCode,
                             });
-                        await writer.WriteLineAsync(req.ToJson());
+                        await writer.WriteLineAsync(MessageCrypto.Serialize(req));
 
                         var line = await ReadLineWithTimeoutAsync(reader, 10_000);
                         if (line == null)
@@ -220,7 +221,7 @@ namespace CanvasApp.Client
                         if (line.Length == 0)
                             return new RegisterResult { Success = false, Message = "Server không trả lời" };
 
-                        var resMsg = Message.FromJson(line);
+                        var resMsg = MessageCrypto.Deserialize(line);
                         return resMsg.GetData<RegisterResult>();
                     }
                 }

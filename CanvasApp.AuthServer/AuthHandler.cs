@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading.Tasks;
 using CanvasApp.AuthServer.Services;
 using CanvasApp.Common;
+using CanvasApp.Common.Utils;
 
 namespace CanvasApp.AuthServer
 {
@@ -62,7 +63,7 @@ namespace CanvasApp.AuthServer
                         {
                             response = new Message(MessageType.ERROR, new { message = ex.Message });
                         }
-                        try { await writer.WriteLineAsync(response.ToJson()); }
+                        try { await writer.WriteLineAsync(MessageCrypto.Serialize(response)); }
                         catch (Exception ex)
                         {
                             // Write failed — socket likely broken. Don't try again; exit the
@@ -90,7 +91,7 @@ namespace CanvasApp.AuthServer
         {
             try
             {
-                var msg = Message.FromJson(raw);
+                var msg = MessageCrypto.Deserialize(raw);
                 switch (msg.Type)
                 {
                     case MessageType.AUTH_LOGIN:

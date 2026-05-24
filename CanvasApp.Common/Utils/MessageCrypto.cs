@@ -86,6 +86,33 @@ namespace CanvasApp.Common.Utils
             msg.Data = JsonConvert.DeserializeObject<JToken>(json);
         }
 
+        /// <summary>
+        /// One-stop outbound: encrypts (if <see cref="CryptoConfig.EncryptionEnabled"/>) and
+        /// returns the JSON line ready to write to the socket. Callers swap
+        /// <c>msg.ToJson()</c> → <c>MessageCrypto.Serialize(msg)</c> to enable AES on a path.
+        /// </summary>
+        public static string Serialize(Message msg)
+        {
+            if (msg == null) return null;
+            if (CryptoConfig.EncryptionEnabled && msg.Data != null)
+                EncryptInPlace(msg, CryptoConfig.Key);
+            return msg.ToJson();
+        }
+
+        /// <summary>
+        /// One-stop inbound: parses JSON then decrypts the envelope if present. Callers swap
+        /// <c>Message.FromJson(line)</c> → <c>MessageCrypto.Deserialize(line)</c>. Safe even
+        /// when the peer sent plaintext — no-op if <c>data</c> has no <c>_enc</c> field.
+        /// </summary>
+        public static Message Deserialize(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return null;
+            var msg = Message.FromJson(line);
+            if (msg?.Data != null && IsEncrypted(msg.Data))
+                DecryptInPlace(msg, CryptoConfig.Key);
+            return msg;
+        }
+
         /// <summary>Convenience: encrypt a payload object into an envelope (without mutating a Message).</summary>
         public static object EncryptPayload(object payload, byte[] key)
         {

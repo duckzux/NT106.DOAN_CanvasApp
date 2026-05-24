@@ -240,23 +240,50 @@ namespace CanvasApp.Server
             return keep.ToArray();
         }
 
-        // Dò IPv4 LAN của máy (loại loopback + APIPA 169.254.x.x).
+        // Dò IPv4 LAN của máy. Quy tắc:
+        //   1. Ưu tiên file server.txt cạnh exe (override thủ công cho mạng VPN/double-NAT).
+        //   2. Chỉ chọn adapter UP, có Default Gateway (loại VirtualBox/VMware/Hyper-V host-only,
+        //      loopback, APIPA 169.254.x.x — những adapter này không có gateway).
+        //   3. Tránh interface ảo qua tên ("VirtualBox", "VMware", "Hyper-V", "Loopback").
         // Dùng cho ServerHost trả về client trong ROOM_RESOLVE_RESULT / ROOM_JOIN_RESULT.
         private static string GetLocalLanIp()
         {
             try
             {
-                var ip = NetworkInterface.GetAllNetworkInterfaces()
-                    .Where(n => n.OperationalStatus == OperationalStatus.Up
-                             && n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
-                    .SelectMany(n => n.GetIPProperties().UnicastAddresses)
-                    .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork)
-                    .Select(a => a.Address.ToString())
-                    .FirstOrDefault(s => !s.StartsWith("169.254."));
-                if (!string.IsNullOrEmpty(ip))
+                var overridePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "server.txt");
+                if (File.Exists(overridePath))
                 {
-                    Console.WriteLine($"[CONFIG] Auto-detected LAN IP: {ip}");
-                    return ip;
+                    var overrideIp = File.ReadAllText(overridePath).Trim();
+                    if (!string.IsNullOrEmpty(overrideIp))
+                    {
+                        Console.WriteLine($"[CONFIG] Server IP from server.txt: {overrideIp}");
+                        return overrideIp;
+                    }
+                }
+
+                string[] virtualKeywords = { "VirtualBox", "VMware", "Hyper-V", "Loopback", "Pseudo", "TAP", "TUN" };
+
+                var candidates = NetworkInterface.GetAllNetworkInterfaces()
+                    .Where(n => n.OperationalStatus == OperationalStatus.Up
+                             && n.NetworkInterfaceType != NetworkInterfaceType.Loopback
+                             && !virtualKeywords.Any(k => n.Description.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0))
+                    .Select(n => new
+                    {
+                        Iface = n,
+                        Props = n.GetIPProperties()
+                    })
+                    .Where(x => x.Props.GatewayAddresses.Any(g => g.Address != null && !g.Address.Equals(IPAddress.Any)))
+                    .SelectMany(x => x.Props.UnicastAddresses
+                        .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork)
+                        .Select(a => new { x.Iface.Description, Ip = a.Address.ToString() }))
+                    .Where(c => !c.Ip.StartsWith("169.254."))
+                    .ToList();
+
+                var chosen = candidates.FirstOrDefault();
+                if (chosen != null)
+                {
+                    Console.WriteLine($"[CONFIG] Auto-detected LAN IP: {chosen.Ip}  ({chosen.Description})");
+                    return chosen.Ip;
                 }
             }
             catch (Exception ex)

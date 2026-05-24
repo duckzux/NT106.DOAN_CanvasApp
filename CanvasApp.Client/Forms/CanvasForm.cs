@@ -61,6 +61,19 @@ namespace CanvasApp.Client
         private readonly Dictionary<string, (string FileName, byte[] Data)> _chatFiles =
             new Dictionary<string, (string, byte[])>();
 
+        // Room members mapping: UserId -> RoomMember
+        private readonly Dictionary<int, RoomMember> _roomMembers = new Dictionary<int, RoomMember>();
+
+        private class StrokeNotification
+        {
+            public string Username { get; set; }
+            public Color Color { get; set; }
+            public Common.PointF CanvasPos { get; set; }
+            public DateTime ExpiryTime { get; set; }
+        }
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<int, StrokeNotification> _strokeNotifications = 
+            new System.Collections.Concurrent.ConcurrentDictionary<int, StrokeNotification>();
+
         // Smart shape recognition controller (Drawing/ subsystem)
         private readonly Drawing.ShapeSuggestionController _suggest =
             new Drawing.ShapeSuggestionController();
@@ -107,6 +120,27 @@ namespace CanvasApp.Client
                 if (_textEditActive) canvasPanel.Invalidate();
             };
             _cursorTimer.Start();
+
+            var notificationTimer = new System.Windows.Forms.Timer { Interval = 200 };
+            notificationTimer.Tick += (s, ev) =>
+            {
+                if (_strokeNotifications.Count == 0) return;
+                var now = DateTime.UtcNow;
+                bool expiredAny = false;
+                foreach (var kv in _strokeNotifications)
+                {
+                    if (now > kv.Value.ExpiryTime)
+                    {
+                        _strokeNotifications.TryRemove(kv.Key, out _);
+                        expiredAny = true;
+                    }
+                }
+                if (expiredAny)
+                {
+                    canvasPanel.Invalidate();
+                }
+            };
+            notificationTimer.Start();
             canvasPanel.MouseDown += Canvas_MouseDown;
             canvasPanel.MouseMove += Canvas_MouseMove;
             canvasPanel.MouseUp += Canvas_MouseUp;
@@ -515,6 +549,42 @@ namespace CanvasApp.Client
             // Smart shape recognition: live polyline + suggestion overlay.
             // Rendered after everything else so it appears on top.
             _suggest.Render(e.Graphics, _zoom);
+
+            // Vẽ nhãn của Hướng 2 (Hiện tên khi vẽ xong 1 nét)
+            if (_strokeNotifications.Count > 0)
+            {
+                var savedTransform = g.Transform;
+                g.ResetTransform();
+                try
+                {
+                    foreach (var notif in _strokeNotifications.Values)
+                    {
+                        // Chuyển đổi tọa độ canvas sang tọa độ màn hình thực tế (Screen Space)
+                        float sx = notif.CanvasPos.X * _zoom + _panOffset.X;
+                        float sy = notif.CanvasPos.Y * _zoom + _panOffset.Y;
+
+                        using (var font = new Font("Segoe UI", 9f, FontStyle.Bold))
+                        using (var bgBrush = new SolidBrush(Color.FromArgb(220, notif.Color.R, notif.Color.G, notif.Color.B)))
+                        using (var textBrush = new SolidBrush(Color.White))
+                        using (var borderPen = new Pen(Color.White, 1.5f))
+                        {
+                            string label = "🎨 " + notif.Username;
+                            var size = g.MeasureString(label, font);
+                            float tx = sx + 10;
+                            float ty = sy - size.Height / 2;
+
+                            // Vẽ nhãn tên bo góc hoặc hình chữ nhật hiện đại bán trong suốt
+                            g.FillRectangle(bgBrush, tx, ty, size.Width + 6, size.Height + 4);
+                            g.DrawRectangle(borderPen, tx, ty, size.Width + 6, size.Height + 4);
+                            g.DrawString(label, font, textBrush, tx + 3, ty + 2);
+                        }
+                    }
+                }
+                finally
+                {
+                    g.Transform = savedTransform;
+                }
+            }
         }
 
         private void DrawShape(Graphics g, string type, Common.PointF p1, Common.PointF p2, string colorHex, int thickness)
@@ -1146,6 +1216,25 @@ namespace CanvasApp.Client
                         _history.Add(action);
                         // A remote action invalidates my pending redo branch (Figma semantics).
                         _redoStack.Clear();
+
+                        // Stroke notification trigger
+                        if (action.UserId != Session.CurrentUser?.Id && action.Points != null && action.Points.Count > 0)
+                        {
+                            lock (_roomMembers)
+                            {
+                                if (_roomMembers.TryGetValue(action.UserId, out var member))
+                                {
+                                    _strokeNotifications[action.UserId] = new StrokeNotification
+                                    {
+                                        Username = member.Username,
+                                        Color = HexToColor(member.AvatarColor ?? "#7856CF"),
+                                        CanvasPos = action.Points.Last(),
+                                        ExpiryTime = DateTime.UtcNow.AddSeconds(2)
+                                    };
+                                }
+                            }
+                        }
+
                         canvasPanel.Invalidate();
                         break;
                     }
@@ -1159,6 +1248,25 @@ namespace CanvasApp.Client
                             action.ActionId = "srv-" + action.SeqNo;
                         _history.Add(action);
                         _redoStack.Clear();
+
+                        // Stroke notification trigger for images
+                        if (action.UserId != Session.CurrentUser?.Id && action.Points != null && action.Points.Count > 0)
+                        {
+                            lock (_roomMembers)
+                            {
+                                if (_roomMembers.TryGetValue(action.UserId, out var member))
+                                {
+                                    _strokeNotifications[action.UserId] = new StrokeNotification
+                                    {
+                                        Username = member.Username,
+                                        Color = HexToColor(member.AvatarColor ?? "#7856CF"),
+                                        CanvasPos = action.Points.Last(),
+                                        ExpiryTime = DateTime.UtcNow.AddSeconds(2)
+                                    };
+                                }
+                            }
+                        }
+
                         canvasPanel.Invalidate();
                         break;
                     }
@@ -1245,15 +1353,39 @@ namespace CanvasApp.Client
                         if (!string.IsNullOrEmpty(update.JoinedUsername))
                             AppendSystemMessage($"{update.JoinedUsername} đã tham gia phòng.");
                         if (!string.IsNullOrEmpty(update.LeftUsername))
+                        {
                             AppendSystemMessage($"{update.LeftUsername} đã rời phòng.");
+                            // Remove any active stroke notification for this user
+                            var keyToRemove = _strokeNotifications.FirstOrDefault(kv => kv.Value.Username == update.LeftUsername).Key;
+                            if (keyToRemove != 0)
+                            {
+                                _strokeNotifications.TryRemove(keyToRemove, out _);
+                                canvasPanel.Invalidate();
+                            }
+                        }
                         break;
                 }
             }));
         }
 
+        private void UpdateRoomMembers(List<RoomMember> members)
+        {
+            if (members == null) return;
+            lock (_roomMembers)
+            {
+                _roomMembers.Clear();
+                foreach (var m in members)
+                {
+                    _roomMembers[m.UserId] = m;
+                }
+            }
+        }
+
         // ── Render user list vào pnlUserList ────────────────────────────
         private void RenderUserList(List<RoomMember> members)
         {
+            UpdateRoomMembers(members);
+
             pnlUserList.SuspendLayout();
             pnlUserList.Controls.Clear();
             // AutoScroll on the panel handles >3 members; suppress the horizontal bar so the vertical

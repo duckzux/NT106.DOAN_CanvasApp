@@ -715,6 +715,14 @@ namespace CanvasApp.Server
                         }
                         break;
 
+                    case MessageType.CURSOR_UPDATE:
+                        if (!string.IsNullOrEmpty(client.CurrentRoomId))
+                        {
+                            await _roomManager.BroadcastAsync(client.CurrentRoomId, msg, client);
+                            await PublishToPeersAsync(client.CurrentRoomId, msg);
+                        }
+                        break;
+
                     case MessageType.PING:
                         await client.SendAsync(new Message(MessageType.PONG));
                         break;

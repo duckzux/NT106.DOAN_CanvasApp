@@ -35,6 +35,8 @@ namespace CanvasApp.Client
                     if (await Task.WhenAny(task, Task.Delay(3000)) != task)
                         return new LoginResult { Success = false, Message = "Không kết nối được Load Balancer (timeout)" };
 
+                    await task; // Propagate connection refused or socket errors nicely
+
                     using (var stream = tcp.GetStream())
                     using (var reader = new StreamReader(stream, Encoding.UTF8))
                     using (var writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true })
@@ -71,6 +73,8 @@ namespace CanvasApp.Client
                     var task = tcp.ConnectAsync(Session.LB_HOST, Session.LB_PORT);
                     if (await Task.WhenAny(task, Task.Delay(3000)) != task)
                         return new SendOtpResult { Success = false, Message = "Không kết nối được Load Balancer" };
+
+                    await task; // Propagate connection refused or socket errors nicely
 
                     using (var stream = tcp.GetStream())
                     using (var reader = new StreamReader(stream, Encoding.UTF8))
@@ -110,6 +114,8 @@ namespace CanvasApp.Client
                     if (await Task.WhenAny(task, Task.Delay(3000)) != task)
                         return new ForgotPasswordSendOtpResult { Success = false, Message = "Không kết nối được Load Balancer" };
 
+                    await task; // Propagate connection refused or socket errors nicely
+
                     using (var stream = tcp.GetStream())
                     using (var reader = new StreamReader(stream, Encoding.UTF8))
                     using (var writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true })
@@ -147,6 +153,8 @@ namespace CanvasApp.Client
                     var task = tcp.ConnectAsync(Session.LB_HOST, Session.LB_PORT);
                     if (await Task.WhenAny(task, Task.Delay(3000)) != task)
                         return new ResetPasswordResult { Success = false, Message = "Không kết nối được Load Balancer" };
+
+                    await task; // Propagate connection refused or socket errors nicely
 
                     using (var stream = tcp.GetStream())
                     using (var reader = new StreamReader(stream, Encoding.UTF8))
@@ -188,6 +196,8 @@ namespace CanvasApp.Client
                     var task = tcp.ConnectAsync(Session.LB_HOST, Session.LB_PORT);
                     if (await Task.WhenAny(task, Task.Delay(3000)) != task)
                         return new RegisterResult { Success = false, Message = "Không kết nối được Load Balancer" };
+
+                    await task; // Propagate connection refused or socket errors nicely
 
                     using (var stream = tcp.GetStream())
                     using (var reader = new StreamReader(stream, Encoding.UTF8))

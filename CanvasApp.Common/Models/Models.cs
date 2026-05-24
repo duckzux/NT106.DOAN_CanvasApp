@@ -304,4 +304,12 @@ namespace CanvasApp.Common
         [JsonProperty("serverId")] public string OriginServerId { get; set; }
         [JsonProperty("actions")] public List<DrawAction> Actions { get; set; } = new List<DrawAction>();
     }
+
+    public class CursorUpdatePayload
+    {
+        [JsonProperty("x")] public float X { get; set; }
+        [JsonProperty("y")] public float Y { get; set; }
+        [JsonProperty("username")] public string Username { get; set; }
+        [JsonProperty("color")] public string Color { get; set; }
+    }
 }

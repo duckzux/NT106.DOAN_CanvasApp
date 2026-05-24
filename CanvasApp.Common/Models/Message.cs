@@ -93,6 +93,8 @@ namespace CanvasApp.Common
         public const string DRAW_IMAGE = "DRAW_IMAGE";
         // Update an existing image's position/size. Payload: DrawAction with ActionId, Points=[topLeft, bottomRight]. ImageData omitted.
         public const string DRAW_IMAGE_TRANSFORM = "DRAW_IMAGE_TRANSFORM";
+        // Ephemeral drawing updates
+        public const string CURSOR_UPDATE = "CURSOR_UPDATE";
 
         // Canvas state sync
         public const string CANVAS_STATE = "CANVAS_STATE";

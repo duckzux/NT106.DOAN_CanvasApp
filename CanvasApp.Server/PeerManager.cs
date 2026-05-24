@@ -70,6 +70,7 @@ namespace CanvasApp.Server
             private StreamWriter _writer;
             private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
             private bool _wasConnected; // track if we've connected before (for reconnect callback)
+            private bool _lastConnectFailed;
 
             public async Task ConnectLoopAsync()
             {
@@ -116,6 +117,7 @@ namespace CanvasApp.Server
 
                         bool wasReconnect = _wasConnected;
                         _wasConnected = true;
+                        _lastConnectFailed = false;
 
                         Console.WriteLine($"[PEER] outbound -> {Host}:{Port} connected (reconnect={wasReconnect})");
                         attempts = 0;
@@ -168,7 +170,11 @@ namespace CanvasApp.Server
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"[PEER] outbound {Host}:{Port} error: {ex.Message}");
+                        if (!_lastConnectFailed)
+                        {
+                            Console.WriteLine($"[PEER] outbound {Host}:{Port} error: {ex.Message} (will retry silently...)");
+                            _lastConnectFailed = true;
+                        }
                         // Reconnect with exponential backoff capped at 30s, starting at 500ms
                     }
                     finally

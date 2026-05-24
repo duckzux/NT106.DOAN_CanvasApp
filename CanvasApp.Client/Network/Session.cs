@@ -1,10 +1,12 @@
+using System;
+using System.IO;
 using CanvasApp.Common;
 
 namespace CanvasApp.Client
 {
     /// <summary>
     /// Singleton chứa thông tin phiên của user hiện tại.
-    /// Tất cả Form đều có thể truy cập qua Session.Current. 
+    /// Tất cả Form đều có thể truy cập qua Session.Current.
     /// </summary>
     public static class Session
     {
@@ -12,17 +14,17 @@ namespace CanvasApp.Client
         public static string Token { get; set; }
         public static bool IsLoggedIn => CurrentUser != null && !string.IsNullOrEmpty(Token);
 
-        // ✅ Load Balancer addresses (client chỉ biết LB, không hard-code Canvas Server)
-        public const string LB_HOST = "127.0.0.1";
-        public const int LB_PORT = 9000;
+        // Server IP được đọc từ file server.txt cạnh exe (1 dòng duy nhất chứa IP).
+        // Đổi WiFi → mở Notepad sửa server.txt → chạy lại Client, KHÔNG cần rebuild.
+        public static readonly string LB_HOST   = LoadServerIp();
+        public const          int    LB_PORT   = 9000;
 
-        // Auth Server
-        public const string AUTH_HOST = "127.0.0.1";
-        public const int AUTH_PORT = 9001;
+        public static readonly string AUTH_HOST = LB_HOST;
+        public const          int    AUTH_PORT = 9001;
 
-        // ✅ Canvas Server addresses (được set runtime sau khi LB redirect)
-        public static string CanvasHost { get; set; } = "127.0.0.1";
-        public static int CanvasPort { get; set; } = 9002;
+        // Canvas server runtime address (set sau khi LB redirect qua ROOM_RESOLVE_RESULT)
+        public static string CanvasHost { get; set; } = LB_HOST;
+        public static int    CanvasPort { get; set; } = 9002;
 
         public static void Clear()
         {
@@ -31,6 +33,20 @@ namespace CanvasApp.Client
             CanvasHost = null;
             CanvasPort = 0;
         }
+
+        private static string LoadServerIp()
+        {
+            try
+            {
+                var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "server.txt");
+                if (File.Exists(path))
+                {
+                    var ip = File.ReadAllText(path).Trim();
+                    if (!string.IsNullOrEmpty(ip)) return ip;
+                }
+            }
+            catch { /* fallback dưới */ }
+            return "127.0.0.1";
+        }
     }
 }
-    

@@ -1,7 +1,9 @@
 using System;
 using System.Configuration;
 using System.IO;
+using System.Linq;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -23,8 +25,9 @@ namespace CanvasApp.Server
         private static PeerManager _peerManager;
         // Used by PEER_RELAY envelopes so a publisher can identify itself to receivers.
         private static string _serverId;
-        // ✅ Server's public address (returned to clients for direct connection after LB redirect)
-        private static string _serverHost = "127.0.0.1";
+        // Server's public address (returned to clients for direct connection after LB redirect).
+        // Auto-detect IP LAN lúc khởi động → đổi WiFi không cần sửa code.
+        private static string _serverHost = GetLocalLanIp();
         private static int _serverPort = DefaultPort;
 
         // Max payload size per message. Rejects oversized payloads.
@@ -235,6 +238,33 @@ namespace CanvasApp.Server
                 keep.Add(addr);
             }
             return keep.ToArray();
+        }
+
+        // Dò IPv4 LAN của máy (loại loopback + APIPA 169.254.x.x).
+        // Dùng cho ServerHost trả về client trong ROOM_RESOLVE_RESULT / ROOM_JOIN_RESULT.
+        private static string GetLocalLanIp()
+        {
+            try
+            {
+                var ip = NetworkInterface.GetAllNetworkInterfaces()
+                    .Where(n => n.OperationalStatus == OperationalStatus.Up
+                             && n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                    .SelectMany(n => n.GetIPProperties().UnicastAddresses)
+                    .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork)
+                    .Select(a => a.Address.ToString())
+                    .FirstOrDefault(s => !s.StartsWith("169.254."));
+                if (!string.IsNullOrEmpty(ip))
+                {
+                    Console.WriteLine($"[CONFIG] Auto-detected LAN IP: {ip}");
+                    return ip;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[CONFIG] LAN IP detect failed: {ex.Message}");
+            }
+            Console.WriteLine("[CONFIG] Fallback to 127.0.0.1");
+            return "127.0.0.1";
         }
 
         private static string[] LoadPeersFromConfig()

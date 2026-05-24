@@ -147,8 +147,8 @@ namespace CanvasApp.Client
             canvasPanel.MouseWheel += CanvasPanel_MouseWheel;
 
             // Tools
-            btnPen.Click += (s, e) => _currentTool = "pen";
-            btnEraser.Click += (s, e) => _currentTool = "eraser";
+            btnPen.Click += (s, e) => SetTool("pen");
+            btnEraser.Click += (s, e) => SetTool("eraser");
             // Undo - Redo
             btnUndo.Click += async (s, e) =>
             {
@@ -238,9 +238,9 @@ namespace CanvasApp.Client
             // Shape tools — rectangle/circle/triangle merged into one dropdown on btnRectangle
             // (matches the btnArrow pattern). btnLine stays as its own button.
             var shapeMenu = new ContextMenuStrip();
-            shapeMenu.Items.Add("Hình chữ nhật", null, (s, e) => _currentTool = "rectangle");
-            shapeMenu.Items.Add("Hình tròn",     null, (s, e) => _currentTool = "circle");
-            shapeMenu.Items.Add("Hình tam giác", null, (s, e) => _currentTool = "triangle");
+            shapeMenu.Items.Add("Hình chữ nhật", null, (s, e) => SetTool("rectangle"));
+            shapeMenu.Items.Add("Hình tròn",     null, (s, e) => SetTool("circle"));
+            shapeMenu.Items.Add("Hình tam giác", null, (s, e) => SetTool("triangle"));
             btnRectangle.Click += (s, e) =>
             {
                 var screenPt = toolStrip1.PointToScreen(new Point(btnRectangle.Bounds.Right, btnRectangle.Bounds.Top));
@@ -252,16 +252,16 @@ namespace CanvasApp.Client
             toolStrip1.Items.Remove(btnCircle);
             toolStrip1.Items.Remove(btnTriangle);
 
-            btnLine.Click += (s, e) => _currentTool = "line";
-            btnText.Click += (s, e) => _currentTool = "text";
-            chkFill.Click += (s, e) => _currentTool = "fill";
+            btnLine.Click += (s, e) => SetTool("line");
+            btnText.Click += (s, e) => SetTool("text");
+            chkFill.Click += (s, e) => SetTool("fill");
 
             // Arrow tool — click opens a dropdown of arrow variants.
             var arrowMenu = new ContextMenuStrip();
-            arrowMenu.Items.Add("Mũi tên đơn",        null, (s, e) => _currentTool = "arrow");
-            arrowMenu.Items.Add("Mũi tên hai đầu",    null, (s, e) => _currentTool = "arrow_double");
-            arrowMenu.Items.Add("Mũi tên đứt nét",    null, (s, e) => _currentTool = "arrow_dashed");
-            arrowMenu.Items.Add("Mũi tên đậm",        null, (s, e) => _currentTool = "arrow_thick");
+            arrowMenu.Items.Add("Mũi tên đơn",        null, (s, e) => SetTool("arrow"));
+            arrowMenu.Items.Add("Mũi tên hai đầu",    null, (s, e) => SetTool("arrow_double"));
+            arrowMenu.Items.Add("Mũi tên đứt nét",    null, (s, e) => SetTool("arrow_dashed"));
+            arrowMenu.Items.Add("Mũi tên đậm",        null, (s, e) => SetTool("arrow_thick"));
             btnArrow.Click += (s, e) =>
             {
                 // Anchor menu to the right of the toolstrip button.
@@ -525,8 +525,8 @@ namespace CanvasApp.Client
             // Inline text editing preview — no background, no border
             if (_textEditActive)
             {
-                float fontSize = Math.Max(8f, _thickness);
-                using (var font = new Font("Arial", fontSize, FontStyle.Regular, GraphicsUnit.Point))
+                float fontSize = Math.Max(14f, _thickness * 3f);
+                using (var font = new Font("Segoe UI", fontSize, FontStyle.Regular, GraphicsUnit.Point))
                 using (var brush = new SolidBrush(_currentColor))
                 {
                     e.Graphics.DrawString(_editText, font, brush, _editCanvasPos.X, _editCanvasPos.Y);
@@ -815,6 +815,7 @@ namespace CanvasApp.Client
                     _thickness       = Math.Max(1, existing.Thickness);
                     _textEditActive  = true;
                     _cursorVisible   = true;
+                    this.ActiveControl = null;
 
                     _history.RemoveAll(a => a.ActionId == existing.ActionId);
                     var keep = _undoStack.Where(a => a.ActionId != existing.ActionId).ToArray();
@@ -831,6 +832,9 @@ namespace CanvasApp.Client
                 _editText = "";
                 _editCanvasPos = clickPt;
                 _cursorVisible = true;
+                // Drop focus from chat input so subsequent keystrokes hit the form's
+                // KeyPreview path and end up in _editText, not in the chat textbox.
+                this.ActiveControl = null;
                 canvasPanel.Invalidate();
                 return;
             }
@@ -1046,7 +1050,7 @@ namespace CanvasApp.Client
                 if (action.Points.Count < 1) return;
                 EnsureCanvasCovers(action.Points[0].X, action.Points[0].Y);
                 string textContent = action.Type.Substring(5);
-                using (var font = new Font("Arial", Math.Max(1f, action.Thickness), FontStyle.Regular, GraphicsUnit.Point))
+                using (var font = new Font("Segoe UI", Math.Max(14f, action.Thickness), FontStyle.Regular, GraphicsUnit.Point))
                 using (var brush = new SolidBrush(HexToColor(action.Color)))
                     _graphics.DrawString(textContent, font, brush, action.Points[0].X, action.Points[0].Y);
                 return;
@@ -1583,7 +1587,20 @@ namespace CanvasApp.Client
                 ? FormWindowState.Normal : FormWindowState.Maximized;
         }
         private void toolStripStatusLabel1_Click(object sender, EventArgs e) { }
-        private void btnCircle_Click(object sender, EventArgs e) { _currentTool = "circle"; }
+        private void btnCircle_Click(object sender, EventArgs e) { SetTool("circle"); }
+
+        // Centralised tool switcher. If user switches away while a text-edit session is open,
+        // commit (or cancel) it so the lingering _textEditActive flag never steals chat keys.
+        private void SetTool(string tool)
+        {
+            if (_textEditActive && tool != "text")
+            {
+                // Commit if user typed something; otherwise just drop the empty session.
+                if (!string.IsNullOrEmpty(_editText.Trim())) CommitTextEdit();
+                else CancelTextEdit();
+            }
+            _currentTool = tool;
+        }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
@@ -1636,8 +1653,28 @@ namespace CanvasApp.Client
             return MessageType.DRAW_END; // pen, eraser
         }
 
+        // Walks the active-control chain looking for any text input (RichTextBox / Guna2TextBox's
+        // inner TextBox / etc.). When one has focus we must NOT intercept keys for text-edit or
+        // shortcuts, otherwise the chat box silently loses every keystroke to the canvas.
+        private bool IsTextInputFocused()
+        {
+            Control c = this.ActiveControl;
+            while (c != null)
+            {
+                if (c is TextBoxBase) return true;
+                if (c is ContainerControl cc && cc.ActiveControl != null && cc.ActiveControl != c)
+                    c = cc.ActiveControl;
+                else
+                    return false;
+            }
+            return false;
+        }
+
         private void CanvasForm_KeyDown(object sender, KeyEventArgs e)
         {
+            // Chat/textbox focused → let WinForms route keys normally.
+            if (IsTextInputFocused()) return;
+
             if (_textEditActive)
             {
                 if (e.KeyCode == Keys.Enter)
@@ -1703,6 +1740,8 @@ namespace CanvasApp.Client
         private void CanvasForm_KeyPress(object sender, KeyPressEventArgs e)
         {
             if (!_textEditActive) return;
+            // Chat/textbox focused → let the textbox receive the character normally.
+            if (IsTextInputFocused()) return;
             if (e.KeyChar == '\r' || e.KeyChar == '\b' || e.KeyChar == '\x1b') return;
             if (e.KeyChar >= 32)
             {
@@ -1737,7 +1776,7 @@ namespace CanvasApp.Client
                 ActionId = NewActionId(),
                 Type = "text:" + text,
                 Color = ColorToHex(_currentColor),
-                Thickness = Math.Max(8, _thickness),
+                Thickness = (int)Math.Max(14f, _thickness * 3f),
                 Points = new List<Common.PointF> { _editCanvasPos }
             };
             DrawActionLocal(textAction);

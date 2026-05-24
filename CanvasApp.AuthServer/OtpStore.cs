@@ -44,18 +44,22 @@ namespace CanvasApp.AuthServer
 
         public void Save(string token, string username, string email, string codeHash, DateTime expiresUtc)
         {
+            // created_at phải set tường minh bằng UtcNow — KHÔNG dùng MySQL DEFAULT CURRENT_TIMESTAMP
+            // (đó là giờ local của MySQL server). Rate-limit query so sánh với DateTime.UtcNow nên
+            // created_at cũng bắt buộc UTC, lệch timezone sẽ làm rate-limit "kẹt" 7 tiếng ở VN.
             using (var conn = new MySqlConnection(_connectionString))
             {
                 conn.Open();
                 var cmd = conn.CreateCommand();
                 cmd.CommandText = @"INSERT INTO email_otp_codes
-                                    (token, username, email, code_hash, expires_at)
-                                    VALUES (@Token, @Username, @Email, @CodeHash, @ExpiresAt)";
+                                    (token, username, email, code_hash, expires_at, created_at)
+                                    VALUES (@Token, @Username, @Email, @CodeHash, @ExpiresAt, @CreatedAt)";
                 cmd.Parameters.AddWithValue("@Token", token);
                 cmd.Parameters.AddWithValue("@Username", username);
                 cmd.Parameters.AddWithValue("@Email", email);
                 cmd.Parameters.AddWithValue("@CodeHash", codeHash);
                 cmd.Parameters.AddWithValue("@ExpiresAt", expiresUtc);
+                cmd.Parameters.AddWithValue("@CreatedAt", DateTime.UtcNow);
                 cmd.ExecuteNonQuery();
             }
         }

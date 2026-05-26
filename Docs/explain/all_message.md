@@ -12,7 +12,7 @@
 
 ---
 
-## 📡 Các luồng kết nối
+## Các luồng kết nối
 
 | Luồng | Người gửi → Người nhận | Loại kết nối |
 |-------|------------------------|--------------|
@@ -23,7 +23,7 @@
 
 ---
 
-## 1. 🔐 AUTH — Đăng nhập / Đăng ký / Quên mật khẩu
+## 1. AUTH — Đăng nhập / Đăng ký / Quên mật khẩu
 
 > **Tất cả AUTH_*** đi qua **LoadBalancer → AuthServer**, qua connection ngắn hạn.
 
@@ -128,189 +128,10 @@ Hoàn tất đăng ký với OTP đã nhận.
 
 ---
 
-## 1.1 📧 Chi tiết flow gửi OTP qua email
-
-> Áp dụng cho cả **đăng ký** (`AUTH_SEND_OTP`) lẫn **quên mật khẩu** (`AUTH_FORGOT_SEND_OTP`). Code: [OtpService.cs](../../CanvasApp.AuthServer/Services/OtpService.cs), [OtpStore.cs](../../CanvasApp.AuthServer/OtpStore.cs), [SmtpEmailSender.cs](../../CanvasApp.AuthServer/Services/SmtpEmailSender.cs).
-
-### Sơ đồ flow (đăng ký — quên mật khẩu tương tự)
-
-```
-┌────────┐                ┌────────┐               ┌──────────┐         ┌────────┐
-│ Client │                │  Auth  │               │  MySQL   │         │ Gmail  │
-│        │                │ Server │               │email_otp │         │  SMTP  │
-└───┬────┘                └───┬────┘               └─────┬────┘         └────┬───┘
-    │  AUTH_SEND_OTP          │                          │                   │
-    │ {Username, Email}       │                          │                   │
-    ├────────────────────────▶│                          │                   │
-    │                         │ CheckRateLimit(email)    │                   │
-    │                         ├─SELECT COUNT(*)─────────▶│                   │
-    │                         │◀─count───────────────────┤                   │
-    │                         │                          │                   │
-    │                         │ UsernameExists?          │                   │
-    │                         ├──SELECT 1 FROM users────▶│                   │
-    │                         │                          │                   │
-    │                         │ code = RNG.6digits()     │                   │
-    │                         │ token = GUID             │                   │
-    │                         │ codeHash = BCrypt(code,  │                   │
-    │                         │   workFactor=10)         │                   │
-    │                         │                          │                   │
-    │                         │ Save(token, username,    │                   │
-    │                         │   email, codeHash,       │                   │
-    │                         │   expires=now+5m,        │                   │
-    │                         │   created=UtcNow)        │                   │
-    │                         ├──INSERT─────────────────▶│                   │
-    │                         │                          │                   │
-    │                         │ SmtpClient.Send(         │                   │
-    │                         │   to=email,              │                   │
-    │                         │   body=HTML{code})       │                   │
-    │                         ├──────────────────────────────────────────────▶│
-    │                         │                          │           SMTPS:587│
-    │                         │                          │           STARTTLS │
-    │                         │                          │           AUTH PLAIN│
-    │                         │                          │                   │
-    │ AUTH_SEND_OTP_RESULT    │                          │                   │
-    │ {Success, OtpToken,     │                          │                   │
-    │  ExpiresInSeconds:300}  │                          │                   │
-    │◀────────────────────────┤                          │                   │
-    │                         │                          │                   │
-    │   (user mở mail, đọc code 6 số)                    │                   │
-    │                         │                          │                   │
-    │  AUTH_REGISTER          │                          │                   │
-    │ {Username, Password,    │                          │                   │
-    │  Email, OtpToken,       │                          │                   │
-    │  OtpCode:"482917"}      │                          │                   │
-    ├────────────────────────▶│                          │                   │
-    │                         │ Verify(token, code, ...) │                   │
-    │                         ├─SELECT...WHERE token────▶│                   │
-    │                         │◀─OtpRecord───────────────┤                   │
-    │                         │ BCrypt.Verify(code,      │                   │
-    │                         │   record.CodeHash)       │                   │
-    │                         │ MarkUsed(token) (atomic) │                   │
-    │                         ├─UPDATE used=1───────────▶│                   │
-    │                         │                          │                   │
-    │                         │ UserStore.Register(...)  │                   │
-    │                         ├─INSERT users────────────▶│                   │
-    │ AUTH_REGISTER_RESULT    │                          │                   │
-    │◀────────────────────────┤                          │                   │
-```
-
-### Tại sao tách `OtpToken` và `OtpCode`?
-
-- `OtpCode` = 6 số gửi qua **email** (kênh phụ — out-of-band).
-- `OtpToken` = GUID gửi qua **TCP** (kênh chính), client nhớ và gửi lại khi verify.
-- Khi `AUTH_REGISTER` đi, server tra DB bằng `OtpToken` để lấy `codeHash`, rồi `BCrypt.Verify(OtpCode, codeHash)`. **Server không bao giờ lưu code plaintext.**
-- Lợi ích: kẻ tấn công sniff được token cũng phải có mail mới biết code; sniff được code cũng phải có token mới biết bind với username nào.
-
-### Schema bảng `email_otp_codes`
-
-```sql
-CREATE TABLE email_otp_codes (
-    token       CHAR(36)     PRIMARY KEY,    -- GUID, gửi cho client
-    username    VARCHAR(50)  NOT NULL,       -- bind code → username
-    email       VARCHAR(100) NOT NULL,       -- bind code → email
-    code_hash   VARCHAR(255) NOT NULL,       -- BCrypt(code, workFactor=10)
-    expires_at  DATETIME     NOT NULL,       -- UTC, mặc định +5 phút
-    attempts    INT          NOT NULL DEFAULT 0,  -- guard brute-force, max 5
-    used        TINYINT(1)   NOT NULL DEFAULT 0,  -- single-shot
-    created_at  DATETIME,                    -- UTC (set tường minh, KHÔNG dùng MySQL default)
-    INDEX idx_otp_email (email)
-);
-```
-
-> ⚠ **Bug đã fix:** `created_at` trước đây dùng `DEFAULT CURRENT_TIMESTAMP` — MySQL ghi giờ local server (ICT). Rate-limit query so với `DateTime.UtcNow.AddMinutes(-1)` (giờ UTC) → `created_at` luôn lớn hơn 7 tiếng → rate-limit "kẹt" 7 tiếng ở VN. Giờ luôn set tường minh `@CreatedAt = DateTime.UtcNow`.
-
-### Sinh OTP code (cryptographically random)
-
-```csharp
-private static string GenerateSixDigitCode()
-{
-    var bytes = new byte[4];
-    using (var rng = new RNGCryptoServiceProvider())
-        rng.GetBytes(bytes);
-    uint v = BitConverter.ToUInt32(bytes, 0) % 1000000u;
-    return v.ToString("D6");   // "000000" → "999999"
-}
-```
-
-- Dùng `RNGCryptoServiceProvider` (CSPRNG), **không** dùng `Random` (predictable seed = current time).
-- 4 bytes → uint → mod 1_000_000 → có **modulo bias rất nhỏ** (chấp nhận được cho 6-digit OTP, không phải crypto key).
-
-### Rate-limit (chống spam mail / DoS)
-
-```csharp
-private const int RateLimitPerMinute = 1;
-private const int RateLimitPerHour   = 5;
-
-private string CheckRateLimit(string email)
-{
-    if (_store.CountRecentByEmail(email, DateTime.UtcNow.AddMinutes(-1)) >= 1)
-        return "Vui lòng đợi 1 phút trước khi yêu cầu mã mới";
-    if (_store.CountRecentByEmail(email, DateTime.UtcNow.AddHours(-1)) >= 5)
-        return "Đã yêu cầu quá nhiều mã trong 1 giờ — thử lại sau";
-    return null;
-}
-```
-
-- Per-email không per-IP → 1 user spam mail dù đổi IP vẫn bị chặn.
-- Bị bypass nếu attacker đổi email mỗi lần — không phòng được user enumeration. Có thể thêm per-IP rate-limit sau.
-
-### Verify (single-shot, brute-force guard)
-
-```csharp
-public (bool ok, string message, OtpRecord record) Verify(token, code, expectedUser, expectedEmail, ...)
-{
-    var rec = _store.Find(token);
-    if (rec == null)                               return "Mã không tồn tại";
-    if (rec.Used)                                  return "Mã đã được sử dụng";
-    if (DateTime.UtcNow > rec.ExpiresUtc)          return "Mã hết hạn";
-    if (rec.Attempts >= 5)                         return "Mã bị khoá do nhập sai 5 lần";
-
-    // Bind: code phải sinh cho ĐÚNG (username, email) — chống code-swap
-    if (rec.Username != expectedUser ||
-        !string.Equals(rec.Email, expectedEmail, OrdinalIgnoreCase))
-        return "Không khớp tài khoản/email";
-
-    if (!BCrypt.Net.BCrypt.Verify(code, rec.CodeHash))
-    {
-        _store.IncrementAttempts(token);   // 5 lần sai → khoá
-        return "Mã không đúng";
-    }
-    if (markUsedOnSuccess) _store.MarkUsed(token);  // single-shot
-    return ok;
-}
-```
-
-- `markUsedOnSuccess=false` dùng cho `AUTH_RESET_PASSWORD`: chỉ burn token **sau khi** `UpdatePassword` thành công — tránh case DB lỗi giữa chừng, OTP bị burn nhưng password chưa đổi → user phải xin mã mới.
-
-### SMTP (Gmail App Password)
-
-```
-SmtpHost:    smtp.gmail.com
-SmtpPort:    587   (submission, STARTTLS)
-SmtpEnableSsl: true  → SmtpClient nâng cấp TLS sau khi greet
-Credentials: NetworkCredential(user, AppPassword)
-                ↑ App Password 16 ký tự, KHÔNG dùng password Gmail thật
-Timeout:     15s
-```
-
-> Setup Gmail: bật 2FA → tạo App Password tại myaccount.google.com/apppasswords → lưu vào `App.config` (`SmtpPassword`). Production: chuyển qua env var hoặc Key Vault, không commit vào git.
-
-### Tổng kết phòng chống tấn công
-
-| Tấn công | Phòng chống |
-|---|---|
-| Sniff TCP để đoán code | Code chỉ ở mail (out-of-band), payload TCP chỉ có `OtpToken` GUID |
-| Brute-force 6 số (1M permutations) | `attempts >= 5` khoá token; expiry 5 phút |
-| Spam mail (DoS user inbox / SMTP cost) | Rate-limit 1/phút, 5/giờ per email |
-| Replay code đã dùng | `used = 1` sau lần verify thành công đầu |
-| Sniff DB dump | `code_hash = BCrypt(code, 10)` — không có plaintext |
-| Code-swap (verify code của email A cho email B) | Bind `(username, email)` check trong `Verify()` |
-| Race: DB lỗi giữa chừng đổi password → OTP đã burn | `markUsedOnSuccess=false` + burn sau khi commit |
-| MitM đọc nội dung mail | TLS giữa AuthServer ↔ Gmail (STARTTLS:587); end-to-mailbox vẫn dựa Gmail TLS |
-
+#
 ---
 
-## 2. 🏠 LOBBY & ROOM ADMIN — Client → Canvas Server (qua LB)
+## 2. LOBBY & ROOM ADMIN — Client → Canvas Server (qua LB)
 
 > Mỗi request mở connection ngắn hạn; LB peek `type` + (nếu có) `RoomId` để route đúng server.
 
@@ -421,7 +242,7 @@ LB sniff để gọi `UnregisterRoom` (giảm `RoomCount` của backend).
 
 ---
 
-## 3. 🎨 REALTIME ROOM — Client ↔ Canvas Server (persistent direct)
+## 3. REALTIME ROOM — Client ↔ Canvas Server (persistent direct)
 
 > Sau `ROOM_RESOLVE`, client direct-connect đến canvas server bằng socket persistent.
 
@@ -484,7 +305,7 @@ Server đẩy khi danh sách member thay đổi (có người join/leave).
 
 ---
 
-## 4. ✏️ DRAWING — Client ↔ Canvas Server (broadcast)
+## 4. DRAWING — Client ↔ Canvas Server (broadcast)
 
 > Vẽ vector. `DRAW_START`/`DRAW_MOVE` là live signal (không persist); `DRAW_END`/`DRAW_SHAPE`/... mới persist vào `draw_actions`.
 
@@ -609,7 +430,7 @@ Response: server gửi lại snapshot tương tự `ROOM_JOIN_RESULT` (chỉ ph�
 
 ---
 
-## 5. 💬 CHAT — Client ↔ Canvas Server (broadcast)
+## 5. CHAT — Client ↔ Canvas Server (broadcast)
 
 ### `CHAT_MESSAGE` — Client → Canvas Server → broadcast (kể cả sender)
 ```json
@@ -645,7 +466,7 @@ File attachment (base64, ≤ 2MB).
 
 ---
 
-## 6. 🛡️ SYSTEM
+## 6. SYSTEM
 
 ### `PING` — Client → Canvas Server
 Heartbeat mỗi 10 giây. Không cần token.
@@ -668,7 +489,7 @@ Báo lỗi (token invalid, payload quá lớn, ...).
 
 ---
 
-## 7. 🌐 PEER MESH — Canvas Server ↔ Canvas Server
+## 7. PEER MESH — Canvas Server ↔ Canvas Server
 
 > Mỗi canvas server mở persistent connection sang các peer khác (port = client port + 100).
 > Format: `Message` chuẩn, nhưng chỉ gửi giữa các server, **không bao giờ đi tới client**.
@@ -777,189 +598,8 @@ Heartbeat giữa 2 peer mỗi 15 giây để phát hiện half-open connection.
 
 ---
 
-## 8. 🔐 Cryptography — toàn bộ primitive đang dùng
 
-> Thư viện: .NET Framework 4.8 `System.Security.Cryptography` + `BCrypt.Net-Next` (NuGet). Tất cả crypto là **standard-library**, không tự cài (homemade crypto = nguy hiểm).
-
-### Bản đồ: chỗ nào dùng cái gì
-
-| Mục đích | Primitive | Code |
-|---|---|---|
-| Hash password user | `BCrypt(password, workFactor=12)` | [UserStore.cs:220, 379](../../CanvasApp.AuthServer/UserStore.cs#L220) |
-| Hash OTP code | `BCrypt(code, workFactor=10)` | [OtpService.cs:94](../../CanvasApp.AuthServer/Services/OtpService.cs#L94) |
-| Hash password phòng vẽ | `BCrypt(roomPwd, workFactor=10)` | `RoomManager.cs` |
-| Auth token (JWT-lite) | `HMAC-SHA256(payload, secret)` + base64 | [UserStore.cs:398-446](../../CanvasApp.AuthServer/UserStore.cs#L398-L446) |
-| Random OTP code 6 số | `RNGCryptoServiceProvider` (CSPRNG) | [OtpService.cs:278](../../CanvasApp.AuthServer/Services/OtpService.cs#L278) |
-| Token GUID | `Guid.NewGuid()` (v4 random) | [OtpService.cs:92](../../CanvasApp.AuthServer/Services/OtpService.cs#L92) |
-| Mã hoá payload (opt-in) | `AES-256-CBC` + `HMAC-SHA256` (Encrypt-then-MAC) | [AesHelper.cs](../../CanvasApp.Common/Utils/AesHelper.cs), [MessageCrypto.cs](../../CanvasApp.Common/Utils/MessageCrypto.cs) |
-| So sánh MAC / token | `FixedTimeEquals` (constant-time XOR) | [UserStore.cs:440](../../CanvasApp.AuthServer/UserStore.cs#L440), [AesHelper.cs:129](../../CanvasApp.Common/Utils/AesHelper.cs#L129) |
-| Chống timing-side-channel login | `BCrypt.Verify(dummyHash)` khi user không tồn tại | [UserStore.cs:272](../../CanvasApp.AuthServer/UserStore.cs#L272) |
-
-### 8.1. BCrypt — hash password & OTP
-
-```csharp
-// Lưu
-string hash = BCrypt.Net.BCrypt.HashPassword(plaintext, workFactor: 12);
-// Verify
-bool ok = BCrypt.Net.BCrypt.Verify(plaintext, hash);
-```
-
-- **Adaptive hash** với salt sinh trong hash (lưu chung trong chuỗi `$2a$12$<salt><hash>`).
-- `workFactor=12` (password user): ≈100ms/hash → brute-force 100M password mất ~115 ngày trên 1 GPU.
-- `workFactor=10` (OTP code): nhanh hơn (~25ms) vì OTP entropy thấp (1M), expiry 5 phút, mỗi token chỉ verify được 5 lần — không cần 12.
-- BCrypt **không reversible** → server bị hack DB, attacker không lấy được plaintext.
-- Salt random per-hash → 2 user cùng password sẽ có hash khác nhau, không rainbow-table được.
-
-### 8.2. HMAC-SHA256 — auth token (JWT-lite)
-
-Format token gửi giữa Auth/Canvas/Client:
-```
-base64(payload) "." base64(HMAC-SHA256(payload, secret))
-↑                ↑
-└─ "userId:username:issuedAtUnix"
-                 └─ 32 bytes
-```
-
-```csharp
-// Issue
-long issuedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-var payload = Encoding.UTF8.GetBytes($"{userId}:{username}:{issuedAt}");
-byte[] sig;
-using (var hmac = new HMACSHA256(secret))
-    sig = hmac.ComputeHash(payload);
-string token = Convert.ToBase64String(payload) + "." + Convert.ToBase64String(sig);
-
-// Verify
-var expectedSig = HMAC-SHA256(payloadBytes, secret);
-if (!FixedTimeEquals(providedSig, expectedSig)) return -1;
-if (UtcNow - issuedAt > 24h) return -1;
-```
-
-- **Secret** lấy từ env `CANVASAPP_JWT_SECRET` (fallback hardcoded dev). Auth issue, Canvas verify — **share cùng secret**.
-- TTL 24h (`TokenTtlSeconds`).
-- `FixedTimeEquals` cần thiết: nếu so sánh bằng `==`/`SequenceEqual`, attacker có thể đoán dần từng byte signature qua timing (response time tăng dần khi đoán đúng byte đầu).
-- Format **không phải JWT chuẩn** (không có header/JSON) — gọn nhẹ hơn nhưng cùng nguyên lý: payload public + MAC signature.
-
-### 8.3. AES-256-CBC + HMAC-SHA256 — mã hoá payload (opt-in)
-
-> Mặc định **TẮT** trên dây để demo dễ thấy JSON qua Wireshark. Bật bằng cách set 32-byte base64 key vào env `CANVASAPP_AES_KEY`.
-
-**Output format** (`AesHelper.EncryptString`):
-```
-base64( IV (16B) ‖ ciphertext (n B) ‖ HMAC (32B) )
-                                       └─ MAC trên (IV ‖ ciphertext)
-```
-
-**Encrypt-then-MAC** order (chuẩn industry):
-```csharp
-// 1. Sinh IV random
-var iv = new byte[16];
-new RNGCryptoServiceProvider().GetBytes(iv);
-
-// 2. AES-256-CBC encrypt với PKCS7 padding
-aes.Mode = CipherMode.CBC;
-aes.Padding = PaddingMode.PKCS7;
-aes.Key = key32; aes.IV = iv;
-byte[] ct = aes.CreateEncryptor().Encrypt(plaintext);
-
-// 3. MAC covers IV || CT (tamper với IV cũng bị detect)
-byte[] mac = HMAC-SHA256(key32, iv ‖ ct);
-
-// 4. Wire format
-return base64(iv ‖ ct ‖ mac);
-```
-
-**Decrypt**: verify MAC **TRƯỚC**, chỉ decrypt nếu MAC pass → chặn padding-oracle attack.
-
-```csharp
-// PadOracle attack (cái tránh được):
-// - Attacker gửi ciphertext sửa, server cố decrypt → PKCS7 padding sai → exception
-// - Exception/timing leak việc padding hợp lệ hay không → attacker decrypt từng block
-// Encrypt-then-MAC: MAC sai → reject NGAY, không chạy đến AES decrypt
-if (!FixedTimeEquals(receivedMac, computedMac))
-    throw new CryptographicException("HMAC verification failed");
-// chỉ tới đây mới AES decrypt → padding oracle không tồn tại
-```
-
-**Envelope wire** (`MessageCrypto.EncryptInPlace`):
-```json
-{
-  "type": "CHAT_MESSAGE",      ← plaintext (LB cần peek route)
-  "token": "MTpu...",          ← plaintext (Server verify HMAC)
-  "data": {
-    "_enc": "base64(IV‖CT‖MAC)",
-    "_v": 1                    ← version: cho phép format evolve
-  }
-}
-```
-
-- `type` + `token` luôn plaintext để LB peek route và verify ngay tại edge.
-- `data` (payload nội dung) được mã hoá → ngay cả MitM bypass TLS cũng không đọc được nội dung tin nhắn/draw.
-
-### 8.4. RNGCryptoServiceProvider — randomness
-
-| Dùng cho | Lý do |
-|---|---|
-| OTP code 6 số | Predictable code = ai cũng đoán được → mất an toàn |
-| AES IV (16 bytes) | Reuse IV trong CBC = leak plaintext relationship |
-| BCrypt salt | (Tự sinh trong thư viện, không cần code thêm) |
-
-> **Không bao giờ** dùng `System.Random` cho mục đích bảo mật — seed mặc định là `Environment.TickCount` → predictable trong vòng vài ms.
-
-### 8.5. FixedTimeEquals — constant-time compare
-
-```csharp
-private static bool FixedTimeEquals(byte[] a, byte[] b)
-{
-    if (a == null || b == null || a.Length != b.Length) return false;
-    int diff = 0;
-    for (int i = 0; i < a.Length; i++) diff |= a[i] ^ b[i];   // XOR tất cả byte
-    return diff == 0;
-}
-```
-
-- `==`, `SequenceEqual`, `memcmp` — đều **return early** khi gặp byte khác đầu tiên → timing leak.
-- XOR tất cả byte (không break sớm) → thời gian compare **không phụ thuộc** content → attacker đoán byte không được.
-- .NET 5+ có sẵn `CryptographicOperations.FixedTimeEquals`. .NET Framework 4.8 phải tự viết.
-
-### 8.6. Timing-side-channel ở login
-
-```csharp
-// Pre-computed BCrypt hash ngay khi class load
-private static readonly string _dummyBcryptHash =
-    BCrypt.Net.BCrypt.HashPassword("dummy-timing-equaliser", 12);
-
-// Khi login:
-if (!reader.Read())  // username KHÔNG tồn tại
-{
-    // ❌ Không có dòng này: return ngay → response time = ~5ms
-    //   → attacker biết username không tồn tại (user enumeration)
-    // ✅ Có dòng này: response time = ~100ms (= BCrypt time với password thật)
-    BCrypt.Net.BCrypt.Verify(password, _dummyBcryptHash);
-    return "Sai tài khoản hoặc mật khẩu";
-}
-```
-
-Đảm bảo "username sai" và "password sai" trả về cùng thời gian → attacker không enumerate user database được qua timing.
-
-### Tóm tắt threat model
-
-| Threat | Defense |
-|---|---|
-| DB dump → đọc password | BCrypt(workFactor=12) — không reverse, work factor cao |
-| Sniff token forge user khác | HMAC-SHA256 signature, secret share Auth↔Canvas |
-| Replay expired token | Embed `issuedAt` trong payload, check TTL 24h |
-| Timing leak token signature | `FixedTimeEquals` constant-time |
-| User enumeration qua login timing | Dummy BCrypt.Verify ở nhánh user-not-found |
-| MitM đọc payload (giả sử AES bật) | AES-256-CBC + HMAC-SHA256 Encrypt-then-MAC |
-| Padding oracle attack | Encrypt-then-MAC: verify MAC trước decrypt |
-| Tamper với IV / ciphertext | MAC bao luôn IV‖CT |
-| IV reuse trong CBC | Random IV mỗi lần encrypt (CSPRNG) |
-| Predictable OTP/salt/IV | RNGCryptoServiceProvider (CSPRNG) |
-
----
-
-## 📊 Tổng kết flow chính
+## Flow chính
 
 ### Login → vào room → chat
 ```
@@ -993,7 +633,7 @@ if (!reader.Read())  // username KHÔNG tồn tại
 
 ---
 
-## 📖 Tham khảo
+## Code
 
 - Định nghĩa: [Message.cs](../../CanvasApp.Common/Models/Message.cs)
 - Payload classes: [Models.cs](../../CanvasApp.Common/Models/Models.cs)

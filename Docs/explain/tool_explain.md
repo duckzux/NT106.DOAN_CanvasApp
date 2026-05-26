@@ -446,7 +446,7 @@ if (action.Type.StartsWith("text:"))
 
 ## 7. Smart Shape Recognition — Tool Pen "thông minh"
 
-Đây là phần phức tạp nhất. Khi chọn Pen và bật `SmartShapeEnabled`, mỗi nét vẽ tay được phân tích sau khi thả chuột: nếu giống một hình cơ bản (line/rectangle/circle/ellipse), một **suggestion overlay** hiện ra cho phép người dùng "Accept" để thay nét tay bằng hình chuẩn, hoặc "Reject" để giữ nguyên.
+ Khi chọn Pen và bật `SmartShapeEnabled`, mỗi nét vẽ tay được phân tích sau khi thả chuột: nếu giống một hình cơ bản (line/rectangle/circle/ellipse), một **suggestion overlay** hiện ra cho phép người dùng "Accept" để thay nét tay bằng hình chuẩn, hoặc "Reject" để giữ nguyên.
 
 ### 7.1. Cấu trúc tổng quan
 

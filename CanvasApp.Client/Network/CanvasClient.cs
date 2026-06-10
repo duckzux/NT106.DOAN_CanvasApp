@@ -26,11 +26,11 @@ namespace CanvasApp.Client
         private int _reconnectAttempts;
         private string _currentRoomId;
 
-        // ✅ Target server address (for dynamic connect-on-join)
+        //  Target server address (for dynamic connect-on-join)
         private string _targetHost = "127.0.0.1";
         private int _targetPort = 9002;
 
-        // ✅ Generation counter — increments on each (re)connect.
+        // ✅Generation counter — increments on each (re)connect.
         // Old ReceiveLoop checks its captured gen against current; if stale, suppress OnDisconnected event.
         // This prevents intentional server-switch from triggering "lost connection" handlers.
         private int _connectionGen;
@@ -67,7 +67,7 @@ namespace CanvasApp.Client
             return await TryConnectAsync();
         }
 
-        // ✅ Connect to a specific Canvas Server (called on join room)
+        //  Connect to a specific Canvas Server (called on join room)
         public async Task<bool> ConnectToServerAsync(string host, int port)
         {
             // Close existing connection if any
@@ -85,7 +85,7 @@ namespace CanvasApp.Client
             try
             {
                 _tcp = new TcpClient();
-                // ✅ Connect to target server (set by ConnectToServerAsync or runtime)
+                // Connect to target server (set by ConnectToServerAsync or runtime)
                 var connectTask = _tcp.ConnectAsync(_targetHost, _targetPort);
                 if (await Task.WhenAny(connectTask, Task.Delay(ConnectTimeoutMs)) != connectTask
                     || connectTask.IsFaulted)

@@ -35,7 +35,7 @@ namespace CanvasApp.Server
         private const int MaxPayloadBytes = 4_194_304;
         // Max room name length
         private const int MaxRoomNameLength = 100;
-        // Regex for HTML-style color string (#RRGGBB or #RGB)
+        
         private static readonly Regex ColorRegex = new Regex(@"^#[0-9A-Fa-f]{3}([0-9A-Fa-f]{3})?$");
 
         static async Task Main(string[] args)

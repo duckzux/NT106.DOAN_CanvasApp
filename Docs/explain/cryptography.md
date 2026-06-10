@@ -153,9 +153,9 @@ private static readonly string _dummyBcryptHash =
 // Khi login:
 if (!reader.Read())  // username KHÔNG tồn tại
 {
-    // ❌ Không có dòng này: return ngay → response time = ~5ms
+    // hông có dòng này: return ngay → response time = ~5ms
     //   → attacker biết username không tồn tại (user enumeration)
-    // ✅ Có dòng này: response time = ~100ms (= BCrypt time với password thật)
+    // Có dòng này: response time = ~100ms (= BCrypt time với password thật)
     BCrypt.Net.BCrypt.Verify(password, _dummyBcryptHash);
     return "Sai tài khoản hoặc mật khẩu";
 }

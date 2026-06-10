@@ -20,25 +20,14 @@ namespace CanvasApp.Client
     {
         private CreateRoom createRoom;
         private RequirePassword requirePassword;
-        // Lobby clients use short-lived TCP per request — there's no persistent socket the
-        // server can push room-list updates over. Poll every few seconds so deletions / password
-        // changes / new rooms made by other users surface without the user manually refreshing.
+
         private Timer _autoRefreshTimer;
-        // Serialises every entry point that calls RefreshRoomListAsync: Load, Shown, timer,
-        // and post-action refreshes (delete / change-password). Without this, two refreshes
-        // can race — the slower one paints stale results over the fresh ones (visible flicker
-        // + ghost room cards).
+    
         private readonly System.Threading.SemaphoreSlim _refreshLock = new System.Threading.SemaphoreSlim(1, 1);
 
-        // Last room set we actually rendered. Used by the diff renderer to update only the
-        // cards that changed (eliminates the Clear()+rebuild flicker) and by the
-        // transient-empty guard to ignore one-off "list is suddenly empty" responses caused
-        // by load-balancing ROOM_LIST across canvas servers that briefly disagree on which
-        // rooms exist (peer-sync lag).
+
         private readonly List<Room> _lastRendered = new List<Room>();
-        // RoomIds that vanished in the most recent silent poll but were present before.
-        // We only actually remove a card when the room has been missing from TWO consecutive
-        // silent polls in a row, which absorbs single-tick load-balancer inconsistencies.
+
         private readonly HashSet<string> _missingOnceSilent = new HashSet<string>(StringComparer.Ordinal);
 
         public LobbyForm()
@@ -49,9 +38,6 @@ namespace CanvasApp.Client
             UpdateGreeting();
             this.SizeChanged += (s, e) => PositionGreetingLabel();
 
-            // Without double-buffering the FlowLayoutPanel repaints on every Add/Remove,
-            // which is visible as a brief white flash even with SuspendLayout. The
-            // DoubleBuffered property is protected on the panel — set it via reflection.
             EnableDoubleBuffering(flowLayoutPanel1);
 
             this.Load += async (s, e) =>
@@ -63,9 +49,6 @@ namespace CanvasApp.Client
 
             this.Shown += async (s, e) =>
             {
-                // After returning from CanvasForm, lobby is shown again — refresh the list.
-                // Goes through the same semaphore as Load so a slow first refresh doesn't
-                // get overwritten by Shown's call.
                 if (this.Visible) await RefreshRoomListAsync();
             };
 
@@ -79,8 +62,6 @@ namespace CanvasApp.Client
             _autoRefreshTimer.Tick += async (s, e) =>
             {
                 if (!this.Visible) return;
-                // tryEnter=true → if a manual refresh is already running, skip this tick rather
-                // than queueing — avoids stacking requests when the LB is slow.
                 await RefreshRoomListAsync(silent: true, tryEnter: true);
             };
             _autoRefreshTimer.Start();
@@ -111,7 +92,6 @@ namespace CanvasApp.Client
             lblGreeting.Location = new Point(Math.Max(0, x), Math.Max(0, y));
         }
 
-        // Adds a "Nhập mã mời" button programmatically next to btnCreateShow.
         private void AddJoinByCodeButton()
         {
             var btn = new Guna.UI2.WinForms.Guna2Button
@@ -159,13 +139,9 @@ namespace CanvasApp.Client
             }
         }
 
-        // ── LB queries (each one fresh short-lived TCP) ─────────────────
-
         private async Task RefreshRoomListAsync(bool silent = false, bool tryEnter = false)
         {
-            // tryEnter=true (timer): if another refresh already holds the lock, skip rather
-            // than queue. tryEnter=false (manual / post-action): wait our turn so the user's
-            // action is always reflected.
+
             if (tryEnter)
             {
                 if (!await _refreshLock.WaitAsync(0)) return;
@@ -179,8 +155,6 @@ namespace CanvasApp.Client
                 var list = await LobbyClient.GetRoomListAsync();
                 if (list == null)
                 {
-                    // Don't pop a dialog on background polls — a transient LB hiccup would
-                    // otherwise spam the user every 3 seconds.
                     if (!silent)
                     {
                         MessageBox.Show("Không kết nối được Load Balancer.", "Lỗi mạng",
@@ -193,26 +167,11 @@ namespace CanvasApp.Client
             finally { _refreshLock.Release(); }
         }
 
-        /// <summary>
-        /// Renders the room list. Two effects worth knowing about:
-        ///   • Diff-based: only the cards that actually changed (added/removed/count-updated)
-        ///     get touched. The previous Clear()+rebuild on every 3s poll was the source of
-        ///     the visible flicker in the lobby.
-        ///   • Transient-empty guard for silent polls: ROOM_LIST is load-balanced across
-        ///     canvas servers that can briefly disagree on which rooms exist (one server
-        ///     finished peer-syncing a delete, the other hasn't yet). A room is only
-        ///     actually removed from the UI when it has been missing from TWO consecutive
-        ///     silent polls — single-tick disappearances are ignored. Manual refreshes
-        ///     (Load / Shown / post-delete / post-password-change) bypass this guard so the
-        ///     user's own actions still produce immediate feedback.
-        /// </summary>
         private void RenderRoomList(RoomListResult result, bool silent)
         {
             var incoming = result?.Rooms ?? new List<Room>();
             var incomingIds = new HashSet<string>(incoming.Select(r => r.Id), StringComparer.Ordinal);
 
-            // Build the set of rooms we'll actually display this tick. Starts from the
-            // server's view; on silent polls we re-add rooms that vanished only once.
             var displayRooms = new List<Room>(incoming);
             if (silent && _lastRendered.Count > 0)
             {

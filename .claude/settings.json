@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "PowerShell($msbuild = Get-ChildItem \"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\" -Recurse -Filter MSBuild.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName; if \\(-not $msbuild\\) { $msbuild = Get-ChildItem \"C:\\\\Program Files\\\\Microsoft Visual Studio\" -Recurse -Filter MSBuild.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName }; Write-Output \\(\"MSBuild: \" + $msbuild\\))",
-      "PowerShell(& \"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\" \"h:\\\\[TL]KI4\\\\T3_LTMCB\\\\DOAN\\\\CanvasApp\\\\CanvasApp.sln\" /t:Build /p:Configuration=Debug /verbosity:minimal /nologo 2>&1)"
-    ]
-  }
-}

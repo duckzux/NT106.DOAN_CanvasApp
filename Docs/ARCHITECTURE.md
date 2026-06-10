@@ -6,7 +6,7 @@
 
 ---
 
-## 1. High-Level Topology
+## 1. Topology
 
 ```
                           ┌─────────────────┐

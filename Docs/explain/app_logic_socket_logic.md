@@ -167,7 +167,7 @@ LB còn intercept `ROOM_CREATE_RESULT` để pre-register binding cho server v�
 
 ---
 
-## 7. Các điểm kỹ thuật quan trọng
+## 7. Lưu ý
 
 * **Line-delimited JSON**: mỗi message là 1 dòng. Interleaving bytes sẽ làm JSON bị lỗi.
 * **StreamWriter không thread-safe**: server và client đều dùng lock để serialize send.
@@ -188,22 +188,64 @@ LB còn intercept `ROOM_CREATE_RESULT` để pre-register binding cho server v�
 
 ---
 
-## 9. File liên quan cần mở khi demo
+## 9. File
 
-* Accept loop + main: [CanvasApp.Server/Program.cs:38-179](../../CanvasApp.Server/Program.cs#L38-L179)
-* Per-client handler (HandleClient): [CanvasApp.Server/Program.cs:285-352](../../CanvasApp.Server/Program.cs#L285-L352)
-* Message dispatcher (ProcessAsync): [CanvasApp.Server/Program.cs:354-728](../../CanvasApp.Server/Program.cs#L354-L728)
-* RoomManager — Create/Resolve/Join/Leave/Broadcast: [CanvasApp.Server/RoomManager.cs:237-770](../../CanvasApp.Server/RoomManager.cs#L237-L770)
-* RoomManager — RecordDrawAction + persistence: [CanvasApp.Server/RoomManager.cs:852](../../CanvasApp.Server/RoomManager.cs#L852)
-* Client persistent socket: [CanvasApp.Client/Network/CanvasClient.cs](../../CanvasApp.Client/Network/CanvasClient.cs)
-* Lobby short-lived socket: [CanvasApp.Client/Network/LobbyClient.cs](../../CanvasApp.Client/Network/LobbyClient.cs)
-* Auth short-lived socket: [CanvasApp.Client/Network/AuthClient.cs](../../CanvasApp.Client/Network/AuthClient.cs)
-* LoadBalancer routing: [CanvasApp.LoadBalancer/LoadBalancer.cs:242-480](../../CanvasApp.LoadBalancer/LoadBalancer.cs#L242-L480)
-* PeerManager (outbound mesh): [CanvasApp.Server/PeerManager.cs](../../CanvasApp.Server/PeerManager.cs)
-* PeerHandler (inbound mesh): [CanvasApp.Server/PeerHandler.cs](../../CanvasApp.Server/PeerHandler.cs)
+
+### 9.1. Protocol chung (định dạng wire)
+
+* `Message` envelope (Type + Data + Token) + danh sách `MessageType.*`: [CanvasApp.Common/Models/Message.cs](../../CanvasApp.Common/Models/Message.cs)
+  → mọi component (Client, LB, Canvas Server, Auth Server, Peer) đều serialize/deserialize qua class này, nên đây là "schema" thống nhất của toàn bộ giao tiếp.
+
+### 9.2. Client → LB (outbound từ Client)
+
+* **Auth ngắn hạn** (LOGIN / REGISTER / SEND_OTP / FORGOT / RESET): [CanvasApp.Client/Network/AuthClient.cs](../../CanvasApp.Client/Network/AuthClient.cs)
+  → mỗi method mở 1 TCP mới đến `Session.LB_HOST:LB_PORT`, gửi 1 Message (mã hóa qua `MessageCrypto`), đọc 1 dòng response, đóng socket.
+* **Lobby ngắn hạn** (ROOM_LIST / ROOM_CREATE / ROOM_RESOLVE / RESOLVE_INVITE_CODE / ROOM_DELETE / ROOM_UPDATE_PASSWORD): [CanvasApp.Client/Network/LobbyClient.cs:73-115](../../CanvasApp.Client/Network/LobbyClient.cs#L73-L115)
+  → `QueryAsync<TResult>`: open → write 1 request → đọc đến khi thấy `terminalType` → close.
+* **Canvas persistent** (DRAW_* / CHAT_* / ROOM_JOIN / PING…): [CanvasApp.Client/Network/CanvasClient.cs:83-141](../../CanvasApp.Client/Network/CanvasClient.cs#L83-L141)
+  → `TryConnectAsync` mở socket dài hạn tới `_targetHost:_targetPort`; `SendAsync` serialize qua `_sendLock` để không interleave JSON.
+
+### 9.3. LB peek + route + proxy (Load Balancer)
+
+* Accept + per-connection state: [CanvasApp.LoadBalancer/LoadBalancer.cs:242-260](../../CanvasApp.LoadBalancer/LoadBalancer.cs#L242-L260)
+* **Peek dòng JSON đầu** và **switch theo `msg.Type` để chọn pool**: [CanvasApp.LoadBalancer/LoadBalancer.cs:254-389](../../CanvasApp.LoadBalancer/LoadBalancer.cs#L254-L389)
+  → đây là chỗ "router" — AUTH_* → Auth pool round-robin; ROOM_JOIN/ROOM_RESOLVE/ROOM_JOIN_BY_CODE → `RouteForRoom` sticky theo RoomId; ROOM_DELETE/ROOM_UPDATE_PASSWORD → `RouteForRoomReadOnly`; mặc định → least-loaded canvas.
+* **Sticky table** (roomId → Canvas server): [CanvasApp.LoadBalancer/LoadBalancer.cs:136-238](../../CanvasApp.LoadBalancer/LoadBalancer.cs#L136-L238)
+* **Forward dòng đầu rồi proxy 2 chiều** (`PumpAsync` c↔s): [CanvasApp.LoadBalancer/LoadBalancer.cs:419-502](../../CanvasApp.LoadBalancer/LoadBalancer.cs#L419-L502)
+* **Sniff response để cập nhật routing table** (ROOM_CREATE_RESULT → claim, ROOM_DELETE_RESULT → unbind): [CanvasApp.LoadBalancer/LoadBalancer.cs:429-460](../../CanvasApp.LoadBalancer/LoadBalancer.cs#L429-L460) + [SniffAndForwardAsync:513-573](../../CanvasApp.LoadBalancer/LoadBalancer.cs#L513-L573)
+
+### 9.4. Canvas Server nhận message từ Client
+
+* Accept loop chính + listener client port: [CanvasApp.Server/Program.cs:171-182](../../CanvasApp.Server/Program.cs#L171-L182)
+* **HandleClient** — vòng đọc `ReadLineAsync` + cleanup `Leave + ROOM_UPDATE broadcast + PEER publish` khi disconnect: [CanvasApp.Server/Program.cs:342-409](../../CanvasApp.Server/Program.cs#L342-L409)
+* **ProcessAsync** — dispatcher trung tâm, switch theo `msg.Type` và gọi `BroadcastAsync` + `PublishToPeersAsync` cho từng nhóm message (ROOM_*, DRAW_*, CHAT_*, CURSOR_UPDATE, PING): [CanvasApp.Server/Program.cs:411-801](../../CanvasApp.Server/Program.cs#L411-L801)
+* **HandleJoin** — thứ tự bắt buộc *ROOM_JOIN_RESULT → PEER_MEMBER_SYNC → ROOM_UPDATE → ROOM_LIST_RESULT*: [CanvasApp.Server/Program.cs:804-839](../../CanvasApp.Server/Program.cs#L804-L839)
+
+### 9.5. Canvas Server gửi message ra Client (broadcast in-room + lobby)
+
+* **`ConnectedClient.SendAsync`** — serialize WriteLine theo từng client (`_sendLock`): [CanvasApp.Server/RoomManager.cs:29-39](../../CanvasApp.Server/RoomManager.cs#L29-L39)
+* **`BroadcastAsync(roomId, msg, sender)`** — fanout cho mọi client trong room (option loại sender): [CanvasApp.Server/RoomManager.cs:813-823](../../CanvasApp.Server/RoomManager.cs#L813-L823)
+* **`BroadcastToLobbyAsync`** — gửi cho client đang ở lobby (chưa join room nào): [CanvasApp.Server/RoomManager.cs:138-147](../../CanvasApp.Server/RoomManager.cs#L138-L147)
+* **`RecordDrawAction`** — gắn `SeqNo` + `ActionId` và enqueue persistence trước khi server gọi BroadcastAsync: [CanvasApp.Server/RoomManager.cs:899-916](../../CanvasApp.Server/RoomManager.cs#L899-L916)
+
+### 9.6. Canvas Server ↔ Peer Canvas Server (mesh đồng bộ multi-server)
+
+* **Envelope `PEER_RELAY` + `PEER_MEMBER_SYNC`** (publisher side): [CanvasApp.Server/Program.cs:187-211](../../CanvasApp.Server/Program.cs#L187-L211)
+* **Peer mesh setup + listener cổng `port+100`**: [CanvasApp.Server/Program.cs:103-169](../../CanvasApp.Server/Program.cs#L103-L169)
+* **`PeerManager.PublishAsync`** — fanout 1 message ra toàn bộ peer outbound connection: [CanvasApp.Server/PeerManager.cs:48-54](../../CanvasApp.Server/PeerManager.cs#L48-L54)
+* **`PeerEndpoint.ConnectLoopAsync`** — outbound TCP persistent tới mỗi peer, gửi `PEER_HELLO` đầu tiên, heartbeat `PEER_PING`, auto-reconnect: [CanvasApp.Server/PeerManager.cs:75-201](../../CanvasApp.Server/PeerManager.cs#L75-L201)
+* **`PeerHandler.HandleAsync`** — inbound: dispatch PEER_HELLO / PEER_RELAY / PEER_MEMBER_SYNC / PEER_ROOM_CREATE / PEER_ROOM_DELETE / PEER_ROOM_PASSWORD_UPDATED / PEER_CANVAS_SYNC / PEER_PING: [CanvasApp.Server/PeerHandler.cs:19-170](../../CanvasApp.Server/PeerHandler.cs#L19-L170)
+* **`RoomManager.ApplyFromPeerAsync`** — apply inner message vào local state, rebuild member list, rồi `BroadcastAsync` xuống client local: [CanvasApp.Server/RoomManager.cs:1194-1273](../../CanvasApp.Server/RoomManager.cs#L1194-L1273)
+
+### 9.7. Client nhận message từ Canvas Server
+
+* **`ReceiveLoop`** — đọc từng dòng JSON, tách `RESOLVE_INVITE_CODE_RESULT` / `ROOM_JOIN_RESULT` / `PONG`, còn lại bắn ra `OnMessageReceived`: [CanvasApp.Client/Network/CanvasClient.cs:145-198](../../CanvasApp.Client/Network/CanvasClient.cs#L145-L198)
+* **`HeartbeatLoop` PING 10s** + **`ReconnectLoop` exponential backoff + xin `CANVAS_STATE` sau reconnect**: [CanvasApp.Client/Network/CanvasClient.cs:202-254](../../CanvasApp.Client/Network/CanvasClient.cs#L202-L254)
+* **Connection generation** (chặn `OnDisconnected` giả khi đổi server LB → Canvas): [CanvasApp.Client/Network/CanvasClient.cs:99-120](../../CanvasApp.Client/Network/CanvasClient.cs#L99-L120)
+
+### 9.8. Auth Server nhận message (đầu kia của AuthClient)
+
+* **`AuthHandler.HandleClientAsync`** — read line → `ProcessMessage` (switch theo Type → AuthService / UserService / OtpService) → write encrypted response: [CanvasApp.AuthServer/AuthHandler.cs:30-123](../../CanvasApp.AuthServer/AuthHandler.cs#L30-L123)
+
 
 ---
-
-## 10. Kết luận
-
-App Logic + Socket Logic của CanvasApp thể hiện đầy đủ: TCP listener, per-client task, message dispatcher, domain logic, broadcast realtime, và đồng bộ DB. Thiết kế phù hợp cho demo nhóm: dễ giải thích luồng vẽ, room, chat, và reconnection bằng log và hành vi thực tế trên UI.

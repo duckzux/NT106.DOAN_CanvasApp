@@ -56,11 +56,39 @@ Get-Process CanvasApp.* -ErrorAction SilentlyContinue | Stop-Process -Force
 ### 0.6. Cấu hình Wireshark trước
 
 - Mở **Adapter for loopback traffic capture**.
-- Display Filter mặc định:
+- Display Filter mặc định (lúc bắt đầu):
   ```
-  tcp.port in {9000 9001 9002 9003 9011 9102 9103}
+  tcp.port in {9000 9001 9002 9003 9011 9102 9103} and tcp.len > 0
   ```
-- Tô màu: `tcp contains "DRAW_"` → đỏ; `tcp contains "AUTH_"` → xanh; `tcp contains "CHAT_"` → vàng.
+  > `tcp.len > 0` để **lọc bỏ ACK rỗng** — chỉ giữ packet có payload thật, dễ tìm hơn rất nhiều.
+- Tô màu (Coloring Rules → New): `tcp contains "DRAW_"` → đỏ; `tcp contains "AUTH_"` → xanh; `tcp contains "CHAT_"` → vàng; `tcp contains "ROOM_"` → tím; `tcp contains "PEER_"` → cam.
+- **Lưu sẵn các filter hay dùng** vào *Bookmark*: bấm icon ⭐ cạnh ô filter → **Manage Display Filter** → Add từng dòng trong bảng sau:
+
+| Mục đích | Display Filter |
+|---|---|
+| Chỉ traffic ứng dụng (bỏ ACK) | `tcp.port in {9000 9001 9002 9003 9011 9102 9103} and tcp.len > 0` |
+| Login | `tcp contains "AUTH_LOGIN"` |
+| Đăng ký + OTP | `tcp contains "AUTH_SEND_OTP" or tcp contains "AUTH_REGISTER"` |
+| Quên mật khẩu | `tcp contains "AUTH_FORGOT_SEND_OTP" or tcp contains "AUTH_RESET_PASSWORD"` |
+| Tạo / Vào phòng | `tcp contains "ROOM_CREATE" or tcp contains "ROOM_JOIN"` |
+| Vẽ 1 nét (Pen) | `tcp contains "DRAW_START" or tcp contains "DRAW_MOVE" or tcp contains "DRAW_END"` |
+| Tất cả draw | `tcp contains "DRAW_"` |
+| Shape / Text / Fill | `tcp contains "DRAW_SHAPE" or tcp contains "DRAW_TEXT" or tcp contains "DRAW_FILL"` |
+| Image overlay | `tcp contains "DRAW_IMAGE"` |
+| Undo/Redo | `tcp contains "DRAW_UNDO"` |
+| Chat text | `tcp contains "CHAT_MESSAGE"` |
+| Chat file đính kèm | `tcp contains "CHAT_FILE"` |
+| Peer mesh giữa Canvas | `tcp.port in {9102 9103} and tcp.len > 0` |
+| Peer event cụ thể | `tcp contains "PEER_RELAY" or tcp contains "PEER_ROOM_DELETE"` |
+| Chỉ qua LoadBalancer | `tcp.port == 9000 and tcp.len > 0` |
+| Chỉ Auth pool | `tcp.port in {9001 9011} and tcp.len > 0` |
+| Chỉ Canvas pool | `tcp.port in {9002 9003} and tcp.len > 0` |
+
+> 💡 **Tip lọc gói tin theo client cụ thể (rất hữu ích khi 3-4 client cùng chạy):** trước khi bấm tool muốn quay, mở PowerShell:
+> ```powershell
+> netstat -ano | findstr :9000
+> ```
+> Tìm dòng có PID của client đang demo → ghi nhớ **client port** (ví dụ `54321`). Sau đó thêm `and tcp.srcport == 54321` vào filter để chỉ thấy packet do client đó gửi.
 
 ### 0.7. Script narrate sẵn các từ chốt
 
@@ -72,26 +100,13 @@ Get-Process CanvasApp.* -ErrorAction SilentlyContinue | Stop-Process -Force
 
 ## 1. Mở đầu video — 0:00–1:00 (Scene A → B)
 
-### Cảnh 1.1. Tiêu đề & nhóm thực hiện (~15s)
-
-**Hiển thị:** Slide tĩnh.
+### Tiêu đề & nhóm thực hiện 
 
 > **CanvasApp — Real-time Collaborative Whiteboard over TCP**
 > NT106.Q23.ANTT — Lập trình mạng căn bản
 > Nhóm 14 — 24520453 / 24521187 / 24521501
-> Difficulty rating ★★★★
 
-### Cảnh 1.2. Tổng quan kiến trúc 1 slide (~30s)
-
-**Hiển thị:** Slide kiến trúc (vẽ trong PowerPoint hoặc dùng ảnh trong `Docs/`).
-
-**Lời thoại mẫu:**
-
-> “CanvasApp là bảng vẽ cộng tác thời gian thực giống Miro / Microsoft Whiteboard, được xây dựng từ socket TCP cấp thấp `System.Net.Sockets`, không dùng SignalR hay WebSocket.
-> Hệ thống có 5 thành phần: **Client WinForms**, **AuthServer** (cổng 9001), **CanvasServer** (cổng 9002), **LoadBalancer** (cổng 9000) và thư viện chung `Common`. Backend ghi xuống **MySQL 8** và đồng bộ trạng thái phòng qua **peer mesh** giữa các CanvasServer.
-> Trong video này, chúng em sẽ trình diễn đầy đủ **11 mục rubric / 10 điểm** + **20 điểm UI** + **10 điểm Creative**.”
-
-### Cảnh 1.3. Mục lục video (~15s)
+### Mục lục video 
 
 **Hiển thị:** Slide “Nội dung sẽ trình diễn”
 
@@ -108,9 +123,9 @@ H. Wrap-up & checklist
 
 ---
 
-## 2. Khởi động hệ thống — 1:00–2:30 (Scene C)
+## 2. Khởi động hệ thống 
 
-### Cảnh 2.1. Khởi MySQL + show DB rỗng/sạch (~20s)
+### Cảnh 2.1. Khởi MySQL + show DB  
 
 **Thao tác:**
 1. Mở **XAMPP** → click **Start** MySQL (port 3306).
@@ -224,6 +239,12 @@ H. Wrap-up & checklist
 
 ### Cảnh 3.2. Đăng ký user mới với OTP (~60s)
 
+> 🔎 **Wireshark filter cho cảnh này** (paste vào ô Display Filter trước khi bấm Gửi OTP):
+> ```
+> tcp contains "AUTH_SEND_OTP" or tcp contains "AUTH_REGISTER"
+> ```
+> Kỳ vọng thấy 4 packet: `AUTH_SEND_OTP` (client→LB) · `AUTH_SEND_OTP_RESULT` (LB→client) · `AUTH_REGISTER` · `AUTH_REGISTER_RESULT`.
+
 **Thao tác:**
 1. Khởi Client #1: chuột phải project `CanvasApp.Client` → Debug → **Start New Instance**.
 2. Trên `LoginForm` → click tab **Đăng ký**.
@@ -258,6 +279,12 @@ H. Wrap-up & checklist
 
 ### Cảnh 3.4. Đăng nhập sai password + đúng password (~30s)
 
+> 🔎 **Wireshark filter:**
+> ```
+> tcp contains "AUTH_LOGIN"
+> ```
+> Sẽ thấy cặp `AUTH_LOGIN` / `AUTH_LOGIN_RESULT` cho mỗi lần submit (1 lần fail + 1 lần thành công).
+
 **Thao tác:**
 1. Quay sang tab **Đăng nhập**.
 2. Nhập `videodemo / wrongpass` → click Login → quay UI báo lỗi `Sai tên đăng nhập hoặc mật khẩu`.
@@ -269,6 +296,12 @@ H. Wrap-up & checklist
 > “Đăng nhập sai và đúng đều mất thời gian xấp xỉ nhau (~100ms) vì khi không tồn tại username, server vẫn chạy 1 BCrypt dummy — **constant-time login** chống user-enumeration qua timing attack.”
 
 ### Cảnh 3.5. Quên mật khẩu (~40s)
+
+> 🔎 **Wireshark filter:**
+> ```
+> tcp contains "AUTH_FORGOT_SEND_OTP" or tcp contains "AUTH_RESET_PASSWORD"
+> ```
+> Kỳ vọng: `AUTH_FORGOT_SEND_OTP` · `AUTH_FORGOT_SEND_OTP_RESULT` · `AUTH_RESET_PASSWORD` · `AUTH_RESET_PASSWORD_RESULT`.
 
 **Thao tác:**
 1. Logout về `LoginForm` → click **Quên mật khẩu**.
@@ -286,6 +319,12 @@ H. Wrap-up & checklist
 ## 4. Vẽ realtime — App Logic + Socket + Multi Client (C.1, C.6) — 4:30–9:00
 
 ### Cảnh 4.1. Chuẩn bị 3 Client cùng phòng (~40s)
+
+> 🔎 **Wireshark filter:**
+> ```
+> tcp contains "ROOM_CREATE" or tcp contains "ROOM_JOIN"
+> ```
+> Kỳ vọng: 1× `ROOM_CREATE` + `ROOM_CREATE_RESULT` (Client #1), 2× `ROOM_JOIN_BY_CODE` + `ROOM_JOIN_RESULT` (Client #2, #3).
 
 **Thao tác:**
 1. Trong VS, chuột phải `CanvasApp.Client` → Debug → **Start New Instance** × 3 lần (đã có 1 từ phần 3, mở thêm 2).
@@ -312,6 +351,12 @@ H. Wrap-up & checklist
 
 ### Cảnh 4.2. Demo Pen + đồng bộ realtime (~30s)
 
+> 🔎 **Wireshark filter:**
+> ```
+> tcp contains "DRAW_START" or tcp contains "DRAW_MOVE" or tcp contains "DRAW_END"
+> ```
+> Hoặc gọn hơn `tcp contains "DRAW_"` (nhưng sẽ thấy cả `DRAW_SHAPE`/`DRAW_TEXT` nếu có). Trước khi vẽ → bấm **Clear** trong Wireshark (icon ✕) để chỉ thấy đúng 1 nét.
+
 **Thao tác:**
 1. Client #1: chọn **Pen**, màu đỏ, độ dày 4 → vẽ chữ ký nguệch ngoạc.
 2. Client #2 & #3: thấy nét vẽ xuất hiện gần như tức thì (< 100ms).
@@ -329,6 +374,19 @@ H. Wrap-up & checklist
 ### Cảnh 4.3. Tour 11 công cụ vẽ — phần Creative (~3 phút)
 
 > Mỗi tool quay **1 vòng tay nhanh** (~15s/tool). Vẽ vào canvas chữ to “DEMO” hoặc hình minh hoạ ý nghĩa.
+
+> 🔎 **Wireshark filter cho từng tool** (đổi filter trước khi demo tool tương ứng để chỉ thấy đúng loại packet):
+>
+> | Tool | Filter |
+> |---|---|
+> | Pen / Eraser | `tcp contains "DRAW_START" or tcp contains "DRAW_MOVE" or tcp contains "DRAW_END"` |
+> | Rectangle / Circle / Triangle / Line / Arrow | `tcp contains "DRAW_SHAPE"` |
+> | Text | `tcp contains "DRAW_TEXT"` |
+> | Flood Fill | `tcp contains "DRAW_FILL"` |
+> | Smart Shape Recognition | `tcp contains "DRAW_SHAPE"` (sau Accept) |
+> | Image insert / move / resize | `tcp contains "DRAW_IMAGE"` (gồm cả `DRAW_IMAGE_TRANSFORM`) |
+> | Undo / Redo | `tcp contains "DRAW_UNDO"` |
+> | Zoom / Pan | *(không có packet — chỉ thao tác client-side)* |
 
 #### a) Pen + độ dày + bảng màu (~15s)
 - Pen, chọn vài màu khác nhau từ palette → vẽ vài nét.
@@ -409,6 +467,12 @@ H. Wrap-up & checklist
 3. Client #2 thấy background đồng bộ.
 
 ### Cảnh 5.3. Gửi file qua chat (~30s)
+
+> 🔎 **Wireshark filter:**
+> ```
+> tcp contains "CHAT_MESSAGE" or tcp contains "CHAT_FILE"
+> ```
+> Filter riêng cho file: `tcp contains "CHAT_FILE"` — chú ý packet này sẽ **rất lớn** (base64 file), Wireshark có thể chia thành nhiều TCP segment → Right-click → **Follow TCP Stream** để xem đủ payload.
 
 **Thao tác:**
 1. Mở panel chat (bên phải) ở Client #1.
@@ -536,9 +600,18 @@ H. Wrap-up & checklist
 
 **Thao tác:**
 1. Mở Wireshark → chọn **Adapter for loopback traffic capture** → bấm Start (vây cá mập).
-2. Display Filter: `tcp.port == 9000`.
+2. Display Filter khởi điểm (bỏ ACK rỗng cho dễ đọc):
+   ```
+   tcp.port == 9000 and tcp.len > 0
+   ```
 
 ### Cảnh 9.2. Capture 1 login flow (~30s)
+
+> 🔎 **Filter chính xác:**
+> ```
+> tcp contains "AUTH_LOGIN"
+> ```
+> Chỉ giữ 2 packet `AUTH_LOGIN` (request) + `AUTH_LOGIN_RESULT` (response) — dễ chỉ trỏ trên video.
 
 **Thao tác:**
 1. Mở Client #4 mới → login `demo1`.
@@ -555,10 +628,16 @@ H. Wrap-up & checklist
 
 ### Cảnh 9.3. Capture DRAW flow (~25s)
 
+> 🔎 **Filter chỉ vòng đời 1 nét vẽ:**
+> ```
+> tcp contains "DRAW_START" or tcp contains "DRAW_MOVE" or tcp contains "DRAW_END"
+> ```
+> Trước khi vẽ → bấm **🗙 Clear** trong Wireshark để xoá packet cũ; sau đó chỉ vẽ **đúng 1 nét** để frame chỉ có START → MOVE × N → END (và các bản broadcast của server gửi cho 2 client còn lại). Tổng số packet sẽ rất gọn, dễ chỉ trỏ.
+
 **Thao tác:**
-1. Đổi filter: `tcp contains "DRAW_"`.
+1. Đổi filter như trên.
 2. Vẽ 1 nét bằng Client #1.
-3. Quay loạt packet: `DRAW_START → DRAW_MOVE × N → DRAW_END` rồi `BROADCAST_DRAW` ngược lại các client khác.
+3. Quay loạt packet: `DRAW_START → DRAW_MOVE × N → DRAW_END` rồi server broadcast cùng message ngược lại các client khác (cùng `type` nhưng đi từ port server → client).
 
 **Lời thoại:**
 
@@ -566,8 +645,17 @@ H. Wrap-up & checklist
 
 ### Cảnh 9.4. Capture peer mesh (~20s)
 
+> 🔎 **Filter peer-mesh (loại bỏ ACK & ping):**
+> ```
+> (tcp.port == 9102 or tcp.port == 9103) and tcp.len > 0 and not tcp contains "PEER_PING" and not tcp contains "PEER_PONG"
+> ```
+> Hoặc lọc thẳng đúng event muốn show:
+> ```
+> tcp contains "PEER_RELAY"
+> ```
+
 **Thao tác:**
-1. Đổi filter: `tcp.port == 9102 or tcp.port == 9103`.
+1. Đổi filter như trên.
 2. Trên Client #2 (nếu đang ở Canvas khác), gửi 1 chat — không thì tạo 1 phòng mới đẩy về Canvas 9003.
 3. Quay packet `PEER_RELAY` chứa inner `CHAT_MESSAGE`.
 
@@ -613,6 +701,12 @@ H. Wrap-up & checklist
 
 ### Cảnh 10.4. Bằng chứng #4 — Auth round-robin (~30s)
 
+> 🔎 **Wireshark filter để show "2 login đi 2 auth server khác nhau":**
+> ```
+> tcp.dstport in {9001 9011} and tcp contains "AUTH_LOGIN"
+> ```
+> Cột **Destination port** sẽ thấy luân phiên `9001` rồi `9011` — bằng chứng trực quan cho round-robin.
+
 **Thao tác:**
 1. Đóng hết Client cũ.
 2. Mở Client #1 → login `demo1` → quan sát console LB:
@@ -629,6 +723,12 @@ H. Wrap-up & checklist
 > “2 login liền kề đi 2 AuthServer khác — bằng chứng round-robin.”
 
 ### Cảnh 10.5. Bằng chứng #5 — Canvas room-affinity stickiness (~50s)
+
+> 🔎 **Wireshark filter:**
+> ```
+> tcp contains "ROOM_CREATE" or tcp contains "ROOM_JOIN_BY_CODE"
+> ```
+> Cả 2 packet này sẽ cùng đi đến **cùng một destination port** (9002) — chứng minh sticky routing.
 
 **Thao tác:**
 1. Client #1: vào Lobby → **Tạo phòng** `AFFINITY-TEST`.

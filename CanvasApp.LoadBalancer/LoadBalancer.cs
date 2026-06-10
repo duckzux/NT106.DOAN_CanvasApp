@@ -72,7 +72,7 @@ namespace CanvasApp.LoadBalancer
             Console.WriteLine($"║   LOAD BALANCER listening on :{_listenPort}             ║");
             Console.WriteLine("╠══════════════════════════════════════════════╣");
             Console.WriteLine($"║   Auth pool:   {_authPool.Count} backend(s)                  ║");
-            Console.WriteLine($"║   Canvas pool: {_canvasPool.Count} backend(s)                  ║");
+            Console.WriteLine($"║   Canvas pool: {_canvasPool.Count} backend(s)                ║");
             Console.WriteLine("╚══════════════════════════════════════════════╝");
             foreach (var s in _authPool)   Console.WriteLine($"   AUTH   • {s.Endpoint}");
             foreach (var s in _canvasPool) Console.WriteLine($"   CANVAS • {s.Endpoint}");

@@ -22,13 +22,35 @@ namespace CanvasApp.Client
         private RequirePassword requirePassword;
 
         private Timer _autoRefreshTimer;
-    
+
         private readonly System.Threading.SemaphoreSlim _refreshLock = new System.Threading.SemaphoreSlim(1, 1);
 
+        // The current "stable" room model, in display order. Mutations to this list are the
+        // only thing DiffApplyCards renders from — refresh responses merge INTO this list
+        // rather than replacing it, so a single inconsistent ROOM_LIST response from a peer
+        // Canvas server that hasn't caught up to the latest PEER_ROOM_* event can't make
+        // cards appear or disappear on their own.
+        private readonly List<Room> _stableRooms = new List<Room>();
 
-        private readonly List<Room> _lastRendered = new List<Room>();
+        // Consecutive refresh responses that did NOT include a given roomId. A room is only
+        // dropped from _stableRooms once its streak crosses MissStreakDropThreshold — that
+        // makes the UI tolerant of one or two refreshes hitting a stale peer without the
+        // card visibly flickering away.
+        private readonly Dictionary<string, int> _missStreak = new Dictionary<string, int>(StringComparer.Ordinal);
+        private const int MissStreakDropThreshold = 3;
 
-        private readonly HashSet<string> _missingOnceSilent = new HashSet<string>(StringComparer.Ordinal);
+        // Room IDs the user just deleted on this client, paired with the deadline after
+        // which we stop suppressing them. While a roomId is in here we filter it out of
+        // every ROOM_LIST response so the card can't briefly reappear when the next
+        // request happens to land on a peer Canvas server that hasn't processed
+        // PEER_ROOM_DELETE yet.
+        private readonly Dictionary<string, DateTime> _recentlyDeleted = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        private static readonly TimeSpan RecentlyDeletedTtl = TimeSpan.FromSeconds(60);
+
+        // Count of in-flight user operations (delete, create, password update, join). The
+        // auto-refresh timer skips its tick while this is non-zero so the user's optimistic
+        // update isn't overwritten by a refresh that raced ahead of peer propagation.
+        private int _userOpInFlight;
 
         public LobbyForm()
         {
@@ -47,13 +69,23 @@ namespace CanvasApp.Client
                 StartAutoRefresh();
             };
 
+            // Shown also fires whenever the form is re-shown after a CanvasForm closes.
+            // Skip the FIRST firing (right after Load) so we don't double-refresh at
+            // startup — that double pass was one of the early visible flickers.
             this.Shown += async (s, e) =>
             {
+                if (!_initialShownFired)
+                {
+                    _initialShownFired = true;
+                    return;
+                }
                 if (this.Visible) await RefreshRoomListAsync();
             };
 
             this.FormClosed += (s, e) => StopAutoRefresh();
         }
+
+        private bool _initialShownFired;
 
         private void StartAutoRefresh()
         {
@@ -141,6 +173,12 @@ namespace CanvasApp.Client
 
         private async Task RefreshRoomListAsync(bool silent = false, bool tryEnter = false)
         {
+            // Silent (timer-driven) refreshes are dropped while a user-initiated operation
+            // is in flight. Otherwise a refresh that started before the operation could
+            // land on a peer that hasn't seen the mutation yet and clobber the optimistic
+            // update we just applied — that was the source of "đổi mật khẩu/thao tác khác
+            // phòng bị mất 1 lúc rồi mới hiện lại".
+            if (silent && _userOpInFlight > 0) return;
 
             if (tryEnter)
             {
@@ -162,40 +200,141 @@ namespace CanvasApp.Client
                     }
                     return;
                 }
-                RenderRoomList(list, silent);
+                // Drop the response on the floor if the user kicked off an operation while
+                // we were waiting for the server — same race as above, just observed from
+                // the opposite end.
+                if (silent && _userOpInFlight > 0) return;
+                MergeIntoStableModel(list, silent);
+                RenderStable();
             }
             finally { _refreshLock.Release(); }
         }
 
-        private void RenderRoomList(RoomListResult result, bool silent)
+        /// <summary>
+        /// Merge a fresh ROOM_LIST response into <see cref="_stableRooms"/>. Rooms in the
+        /// response update existing cards in-place; rooms absent from the response increment
+        /// their miss streak and are only removed once the streak crosses
+        /// <see cref="MissStreakDropThreshold"/>. A single ROOM_LIST that lands on a peer
+        /// Canvas server that hasn't caught up to the latest PEER_ROOM_* event therefore
+        /// cannot make a card flicker out and back in.
+        /// </summary>
+        private void MergeIntoStableModel(RoomListResult result, bool silent)
         {
             var incoming = result?.Rooms ?? new List<Room>();
-            var incomingIds = new HashSet<string>(incoming.Select(r => r.Id), StringComparer.Ordinal);
 
-            var displayRooms = new List<Room>(incoming);
-            if (silent && _lastRendered.Count > 0)
+            // Expire stale tombstones so the dictionary doesn't grow forever.
+            if (_recentlyDeleted.Count > 0)
             {
-                var nextMissingOnce = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var prev in _lastRendered)
+                var now = DateTime.UtcNow;
+                var expired = _recentlyDeleted
+                    .Where(kv => kv.Value <= now)
+                    .Select(kv => kv.Key)
+                    .ToList();
+                foreach (var id in expired) _recentlyDeleted.Remove(id);
+            }
+
+            // Strip rooms the user just deleted — the originating server already removed
+            // them but a peer the LB happens to route ROOM_LIST to may not have processed
+            // PEER_ROOM_DELETE yet.
+            if (_recentlyDeleted.Count > 0)
+                incoming = incoming.Where(r => !_recentlyDeleted.ContainsKey(r.Id)).ToList();
+
+            var incomingIndex = new Dictionary<string, Room>(StringComparer.Ordinal);
+            foreach (var r in incoming) incomingIndex[r.Id] = r;
+
+            // 1) Update / add rooms present in the response.
+            for (int i = 0; i < incoming.Count; i++)
+            {
+                var r = incoming[i];
+                _missStreak.Remove(r.Id);
+
+                int idx = _stableRooms.FindIndex(x => x.Id == r.Id);
+                if (idx >= 0)
                 {
-                    if (incomingIds.Contains(prev.Id)) continue; // still there
-                    if (_missingOnceSilent.Contains(prev.Id)) continue; // missed twice → drop
-                    // First miss for this room — keep it visible for one more tick.
-                    displayRooms.Add(prev);
-                    nextMissingOnce.Add(prev.Id);
+                    // In-place mutation preserves card identity; ordering follows the latest
+                    // response so the lobby reflects server-side ordering changes.
+                    _stableRooms[idx] = r;
                 }
-                _missingOnceSilent.Clear();
-                foreach (var id in nextMissingOnce) _missingOnceSilent.Add(id);
+                else
+                {
+                    _stableRooms.Add(r);
+                }
             }
-            else
+
+            // 2) Walk the existing stable list and bump miss streaks for anything the
+            //    response didn't mention. Drop rooms whose streak crosses the threshold.
+            for (int i = _stableRooms.Count - 1; i >= 0; i--)
             {
-                _missingOnceSilent.Clear();
+                var existing = _stableRooms[i];
+                if (incomingIndex.ContainsKey(existing.Id)) continue;
+                if (_recentlyDeleted.ContainsKey(existing.Id))
+                {
+                    _stableRooms.RemoveAt(i);
+                    _missStreak.Remove(existing.Id);
+                    continue;
+                }
+                _missStreak.TryGetValue(existing.Id, out var streak);
+                streak++;
+                if (streak >= MissStreakDropThreshold)
+                {
+                    _stableRooms.RemoveAt(i);
+                    _missStreak.Remove(existing.Id);
+                }
+                else
+                {
+                    _missStreak[existing.Id] = streak;
+                }
             }
 
-            DiffApplyCards(displayRooms);
+            // 3) Reorder _stableRooms so present rooms follow the response's order while
+            //    rooms only being kept on miss-streak grace appear after them (stable
+            //    relative order amongst themselves preserved by the iteration above).
+            if (_stableRooms.Count > 1)
+            {
+                _stableRooms.Sort((a, b) =>
+                {
+                    bool aIn = incomingIndex.ContainsKey(a.Id);
+                    bool bIn = incomingIndex.ContainsKey(b.Id);
+                    if (aIn && bIn)
+                        return incoming.FindIndex(x => x.Id == a.Id)
+                             .CompareTo(incoming.FindIndex(x => x.Id == b.Id));
+                    if (aIn) return -1;
+                    if (bIn) return 1;
+                    return 0;
+                });
+            }
 
-            _lastRendered.Clear();
-            _lastRendered.AddRange(displayRooms);
+            // Touching `silent` here just keeps the parameter from going unused — the
+            // miss-streak logic is identical for silent and non-silent refreshes by design.
+            _ = silent;
+        }
+
+        // Updates a single field on a stable room from an operation result (e.g. password
+        // change). Used so we don't have to wait for the next refresh to see the change.
+        private bool UpdateStableRoomPassword(string roomId, bool hasPassword)
+        {
+            int idx = _stableRooms.FindIndex(rm => rm.Id == roomId);
+            if (idx < 0) return false;
+            var room = _stableRooms[idx];
+            if (room.HasPassword == hasPassword) return false;
+            room.HasPassword = hasPassword;
+            return true;
+        }
+
+        // Force-removes a room from the stable model. Used for user-initiated delete so
+        // the card vanishes from the UI before the next refresh round-trip.
+        private bool RemoveStableRoom(string roomId)
+        {
+            int idx = _stableRooms.FindIndex(rm => rm.Id == roomId);
+            if (idx < 0) return false;
+            _stableRooms.RemoveAt(idx);
+            _missStreak.Remove(roomId);
+            return true;
+        }
+
+        private void RenderStable()
+        {
+            DiffApplyCards(_stableRooms);
         }
 
         /// <summary>
@@ -292,14 +431,31 @@ namespace CanvasApp.Client
                     MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
                 if (confirm != DialogResult.Yes) return;
 
-                var result = await LobbyClient.DeleteRoomAsync(rc.RoomId);
-                if (result == null || !result.Success)
+                System.Threading.Interlocked.Increment(ref _userOpInFlight);
+                try
                 {
-                    MessageBox.Show(result?.Message ?? "Không kết nối được server.",
-                        "Lỗi xóa phòng", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
+                    var result = await LobbyClient.DeleteRoomAsync(rc.RoomId);
+                    if (result == null || !result.Success)
+                    {
+                        MessageBox.Show(result?.Message ?? "Không kết nối được server.",
+                            "Lỗi xóa phòng", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    // Tombstone the roomId so it's filtered out of every ROOM_LIST response
+                    // until peer mesh propagation has surely finished. We then drop the card
+                    // optimistically — even if the very next refresh hits a stale peer, the
+                    // tombstone keeps it out of the stable model.
+                    _recentlyDeleted[rc.RoomId] = DateTime.UtcNow + RecentlyDeletedTtl;
+                    RemoveStableRoom(rc.RoomId);
+                    RenderStable();
+
+                    await RefreshRoomListAsync();
                 }
-                await RefreshRoomListAsync();
+                finally
+                {
+                    System.Threading.Interlocked.Decrement(ref _userOpInFlight);
+                }
             };
 
             card.OnChangePasswordClick += async (s, e) =>
@@ -308,16 +464,32 @@ namespace CanvasApp.Client
                 var newPwd = PromptNewPassword(rc.RoomName);
                 if (newPwd == null) return; // user cancelled
 
-                var result = await LobbyClient.UpdateRoomPasswordAsync(rc.RoomId, newPwd);
-                if (result == null || !result.Success)
+                System.Threading.Interlocked.Increment(ref _userOpInFlight);
+                try
                 {
-                    MessageBox.Show(result?.Message ?? "Không kết nối được server.",
-                        "Lỗi đổi mật khẩu", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
+                    var result = await LobbyClient.UpdateRoomPasswordAsync(rc.RoomId, newPwd);
+                    if (result == null || !result.Success)
+                    {
+                        MessageBox.Show(result?.Message ?? "Không kết nối được server.",
+                            "Lỗi đổi mật khẩu", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    // Optimistically reflect the password change on the local stable model
+                    // so the lock icon updates before the next refresh round-trip — that's
+                    // what previously felt like "the room disappeared briefly" because the
+                    // refresh ran before peer mesh propagation completed.
+                    if (UpdateStableRoomPassword(rc.RoomId, result.HasPassword))
+                        RenderStable();
+
+                    MessageBox.Show(result.Message, "Đổi mật khẩu",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    await RefreshRoomListAsync();
                 }
-                MessageBox.Show(result.Message, "Đổi mật khẩu",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                await RefreshRoomListAsync();
+                finally
+                {
+                    System.Threading.Interlocked.Decrement(ref _userOpInFlight);
+                }
             };
 
             return card;
@@ -374,27 +546,43 @@ namespace CanvasApp.Client
 
         private async Task JoinRoomAsync(string roomId, string password)
         {
-            // 1) Resolve via LB: server checks room exists + password and returns where to
-            //    direct-connect. No Join happens server-side here — so no spurious broadcast.
-            var resolved = await LobbyClient.ResolveRoomAsync(roomId, password);
-            await HandleResolveResultAsync(resolved, roomId, password, fromCode: null);
+            System.Threading.Interlocked.Increment(ref _userOpInFlight);
+            try
+            {
+                // 1) Resolve via LB: server checks room exists + password and returns where to
+                //    direct-connect. No Join happens server-side here — so no spurious broadcast.
+                var resolved = await LobbyClient.ResolveRoomAsync(roomId, password);
+                await HandleResolveResultAsync(resolved, roomId, password, fromCode: null);
+            }
+            finally
+            {
+                System.Threading.Interlocked.Decrement(ref _userOpInFlight);
+            }
         }
 
         private async Task JoinRoomByCodeAsync(string inviteCode, string password)
         {
-            // Two-step so LB has the resolved roomId for room-affinity routing on ROOM_RESOLVE:
-            //   1) RESOLVE_INVITE_CODE → roomId (any canvas can answer)
-            //   2) ROOM_RESOLVE with that roomId → LB sticky-routes → correct canvas verifies pwd
-            var code = await LobbyClient.ResolveInviteCodeAsync(inviteCode);
-            if (code == null || !code.Success)
+            System.Threading.Interlocked.Increment(ref _userOpInFlight);
+            try
             {
-                MessageBox.Show(code?.Message ?? "Không kết nối được server.",
-                    "Mã mời không hợp lệ", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
+                // Two-step so LB has the resolved roomId for room-affinity routing on ROOM_RESOLVE:
+                //   1) RESOLVE_INVITE_CODE → roomId (any canvas can answer)
+                //   2) ROOM_RESOLVE with that roomId → LB sticky-routes → correct canvas verifies pwd
+                var code = await LobbyClient.ResolveInviteCodeAsync(inviteCode);
+                if (code == null || !code.Success)
+                {
+                    MessageBox.Show(code?.Message ?? "Không kết nối được server.",
+                        "Mã mời không hợp lệ", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
 
-            var resolved = await LobbyClient.ResolveRoomAsync(code.RoomId, password);
-            await HandleResolveResultAsync(resolved, code.RoomId, password, fromCode: inviteCode);
+                var resolved = await LobbyClient.ResolveRoomAsync(code.RoomId, password);
+                await HandleResolveResultAsync(resolved, code.RoomId, password, fromCode: inviteCode);
+            }
+            finally
+            {
+                System.Threading.Interlocked.Decrement(ref _userOpInFlight);
+            }
         }
 
         private async Task HandleResolveResultAsync(ResolveRoomResult res, string roomId, string password, string fromCode)
@@ -494,25 +682,33 @@ namespace CanvasApp.Client
                     if (!string.IsNullOrEmpty(maxText))
                         int.TryParse(maxText.Split(' ')[0], out max);
 
-                    var newRoom = await LobbyClient.CreateRoomAsync(new CreateRoomRequest
+                    System.Threading.Interlocked.Increment(ref _userOpInFlight);
+                    try
                     {
-                        Name = name,
-                        Password = pwd,
-                        Template = template,
-                        MaxUsers = max
-                    });
+                        var newRoom = await LobbyClient.CreateRoomAsync(new CreateRoomRequest
+                        {
+                            Name = name,
+                            Password = pwd,
+                            Template = template,
+                            MaxUsers = max
+                        });
 
-                    createRoom.Visible = false;
+                        createRoom.Visible = false;
 
-                    if (newRoom == null)
-                    {
-                        MessageBox.Show("Tạo phòng thất bại.", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return;
+                        if (newRoom == null)
+                        {
+                            MessageBox.Show("Tạo phòng thất bại.", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            return;
+                        }
+
+                        // The LB has already claimed this room's routing on the create response,
+                        // so the upcoming join lands on the same server that owns the state.
+                        await JoinRoomAsync(newRoom.Id, pwd ?? "");
                     }
-
-                    // The LB has already claimed this room's routing on the create response,
-                    // so the upcoming join lands on the same server that owns the state.
-                    await JoinRoomAsync(newRoom.Id, pwd ?? "");
+                    finally
+                    {
+                        System.Threading.Interlocked.Decrement(ref _userOpInFlight);
+                    }
                 };
 
                 createRoom.OnCancel += () => createRoom.Visible = false;

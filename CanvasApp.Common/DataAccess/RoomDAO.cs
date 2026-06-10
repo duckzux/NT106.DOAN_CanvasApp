@@ -77,6 +77,20 @@ namespace CanvasApp.Common.DataAccess
             }
         }
 
+        // Hard-delete the row. FK constraints on room_members / canvas_snapshots /
+        // draw_actions / chat_messages all use ON DELETE CASCADE so the associated
+        // history is cleaned up in the same transaction.
+        public void Delete(string roomId)
+        {
+            using (var conn = DatabaseManager.OpenConnection())
+            {
+                var cmd = new MySqlCommand(
+                    "DELETE FROM rooms WHERE id=@id", conn);
+                cmd.Parameters.AddWithValue("@id", roomId);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
         // Pass null/empty hash to make the room public again.
         public void UpdatePasswordHash(string roomId, string passwordHash)
         {

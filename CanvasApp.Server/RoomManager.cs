@@ -112,6 +112,27 @@ namespace CanvasApp.Server
         // every chat / draw / room event would be applied twice).
         public string SelfServerId { get; set; }
 
+        // Tombstones for recently-deleted rooms. Prevent a peer that missed the
+        // PEER_ROOM_DELETE (e.g. disconnected during the delete, then reconnected with
+        // a stale KnownRooms list in its PEER_HELLO) from resurrecting the room via
+        // RegisterPeerRoom. TTL is generous so the ghost can't sneak back even after
+        // a longish peer-mesh outage.
+        private readonly ConcurrentDictionary<string, DateTime> _tombstones
+            = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private static readonly TimeSpan TombstoneTtl = TimeSpan.FromMinutes(10);
+
+        private bool IsTombstoned(string roomId)
+        {
+            if (string.IsNullOrEmpty(roomId)) return false;
+            if (!_tombstones.TryGetValue(roomId, out var deletedAt)) return false;
+            if (DateTime.UtcNow - deletedAt > TombstoneTtl)
+            {
+                _tombstones.TryRemove(roomId, out _);
+                return false;
+            }
+            return true;
+        }
+
         public RoomManager(
             RoomDAO roomDao = null,
             RoomMemberDAO memberDao = null,
@@ -361,9 +382,18 @@ namespace CanvasApp.Server
             if (!string.IsNullOrEmpty(room.InviteCode))
                 _codeToRoomId.TryRemove(room.InviteCode, out _);
 
+            // Record the tombstone BEFORE the DB write so a peer racing to register the
+            // room via PEER_HELLO is rejected even if the DB call is slow.
+            _tombstones[roomId] = DateTime.UtcNow;
+
+            // Also forget any peer-reported memberships for this room so a late
+            // PEER_MEMBER_SYNC doesn't leave phantom counts dangling in GetRoomList().
+            foreach (var perPeer in _peerMembers.Values)
+                perPeer.TryRemove(roomId, out _);
+
             if (_roomDao != null)
             {
-                try { _roomDao.SetActive(roomId, false); }
+                try { _roomDao.Delete(roomId); }
                 catch (Exception ex) { Console.WriteLine($"  [DB] DeleteRoom persist failed: {ex.Message}"); }
             }
             Console.WriteLine($"  [Room] Deleted '{room.Name}' ({roomId})");
@@ -1152,6 +1182,14 @@ namespace CanvasApp.Server
         public bool RegisterPeerRoom(Room room)
         {
             if (room == null || string.IsNullOrEmpty(room.Id)) return false;
+            // Refuse resurrection: if we recently deleted this room, a peer's stale
+            // KnownRooms (e.g. they missed our PEER_ROOM_DELETE during a disconnect)
+            // would otherwise re-add it to _rooms and lobby clients would see it back.
+            if (IsTombstoned(room.Id))
+            {
+                Console.WriteLine($"  [Peer] Refused tombstoned room '{room.Name}' ({room.Id})");
+                return false;
+            }
             if (!_rooms.TryAdd(room.Id, room)) return false; // already known
 
             _canvasState[room.Id] = new List<DrawAction>();

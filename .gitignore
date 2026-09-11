@@ -29,3 +29,16 @@ Thumbs.db
 *.exe
 *.dll
 *.pdb
+
+# Secrets / local config (never commit credentials)
+App.secrets.config
+*.secrets.config
+!*.secrets.config.example
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+
+# Claude Code local settings
+.claude/settings.local.json

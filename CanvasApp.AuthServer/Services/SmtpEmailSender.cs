@@ -9,6 +9,7 @@ namespace CanvasApp.AuthServer.Services
     /// Sends mail via the SMTP server configured in App.config (Gmail by default).
     /// Settings keys: SmtpHost, SmtpPort, SmtpUser, SmtpPassword, SmtpFromAddress,
     /// SmtpFromName, SmtpEnableSsl. Falls back to Gmail submission defaults.
+    /// Credentials come from the git-ignored App.secrets.config (see App.secrets.config.example).
     /// </summary>
     public class SmtpEmailSender
     {

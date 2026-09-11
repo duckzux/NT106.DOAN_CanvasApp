@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(\"C:/Program Files/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/MSBuild.exe\" CanvasApp.sln -t:Build -p:Configuration=Debug -m -verbosity:minimal -nologo)",
-      "Bash(\"C:/Program Files/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/MSBuild.exe\" CanvasApp.Client/CanvasApp.Client.csproj -t:Build -p:Configuration=Debug -m -verbosity:minimal -nologo)"
-    ]
-  }
-}
